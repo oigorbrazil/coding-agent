@@ -125,7 +125,7 @@ mod tests {
     fn path_mirrors_plugin_derivation() {
         assert_eq!(
             dbus_path("com.codingagent.desktop.SingleInstance"),
-            "/com/kc1t/coding-agent/SingleInstance"
+            "/com/codingagent/desktop/SingleInstance"
         );
     }
 
