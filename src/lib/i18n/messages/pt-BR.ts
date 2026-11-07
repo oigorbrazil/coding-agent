@@ -1482,6 +1482,12 @@ export const ptBR: Record<MessageKey, string> = {
   'whatsNew.close': 'Entendi',
   'whatsNew.update': 'Ver atualização',
   'whatsNew.releaseHeading': 'v{version} — {date}',
+  'whatsNew.v171.note1':
+    'O Alethe agora é o Coding Agent: novo nome, ícones e identificador, com base no Alethe 1.7.0 de Kauã Miguel.',
+  'whatsNew.v171.note2':
+    'Inclui a skill Coding Opus (v26): memória em second brain e playbooks que rodam os workers no quadro de orquestração.',
+  'whatsNew.v171.note3':
+    'Atualização automática, catálogo de plugins e sincronização em nuvem ficam desligados até o projeto ter serviços próprios.',
   'whatsNew.v170.note1':
     'Recursos agora carregam como plugins: Git Control, Todo List e o Theme Pack viram plugins oficiais, e um plugin pode ser importado a partir da sua pasta.',
   'whatsNew.v170.note2':

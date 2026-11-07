@@ -1240,6 +1240,11 @@ export const zhCN: Record<MessageKey, string> = {
   'whatsNew.close': '明白了',
   'whatsNew.update': '查看更新',
   'whatsNew.releaseHeading': 'v{version} — {date}',
+  'whatsNew.v171.note1':
+    'Alethe 现更名为 Coding Agent：新的名称、图标和标识符，基于 Kauã Miguel 的 Alethe 1.7.0。',
+  'whatsNew.v171.note2':
+    '内置 Coding Opus 技能（v26）：第二大脑记忆，以及在编排看板上运行工作者的剧本。',
+  'whatsNew.v171.note3': '在本项目拥有自己的服务之前，自动更新、插件目录和云同步保持关闭。',
   'whatsNew.v170.note1':
     '功能现在以插件形式加载：Git Control、Todo List 和 Theme Pack 作为官方插件提供，也可以从文件夹导入插件。',
   'whatsNew.v170.note2':

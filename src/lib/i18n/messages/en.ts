@@ -1459,6 +1459,12 @@ export const en = {
   'whatsNew.close': 'Got it',
   'whatsNew.update': 'View update',
   'whatsNew.releaseHeading': 'v{version} — {date}',
+  'whatsNew.v171.note1':
+    'Alethe is now Coding Agent: new name, icons and identifier, based on Alethe 1.7.0 by Kauã Miguel.',
+  'whatsNew.v171.note2':
+    'Ships the Coding Opus skill (v26): second-brain memory plus playbooks that run their workers on the orchestration board.',
+  'whatsNew.v171.note3':
+    'Automatic updates, the plugin catalog and cloud sync are off until this project has its own services.',
   'whatsNew.v170.note1':
     'Features now load as plugins: Git Control, Todo List and the Theme Pack ship as official plugins, and a plugin can be imported from its folder.',
   'whatsNew.v170.note2':
