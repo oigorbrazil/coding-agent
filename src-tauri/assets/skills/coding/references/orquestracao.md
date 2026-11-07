@@ -15,6 +15,9 @@ são subcomandos de `scripts/orchestrate.py` (no Windows, `py scripts/orchestrat
 - **Estratégia do runner** = como uma onda roda (`economy`, `balanced`, `quality`, `research`,
   `parallel`, `rescue`).
 
+> **No Coding Agent** (ferramentas `coding_agent_*` disponíveis), quem sobe os workers é o app:
+> siga [modo-app.md](modo-app.md) e use deste arquivo só playbooks, cota, briefs e disciplina de tokens.
+
 ## Estado e nomes
 
 | Item | Onde |

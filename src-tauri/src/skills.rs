@@ -43,7 +43,7 @@ impl BundledSkill {
 /// Official skills; `npm run skill:sync` rewrites the version and the file list.
 const BUNDLED_SKILLS: [BundledSkill; 1] = [BundledSkill {
     name: "coding",
-    version: 24,
+    version: 25,
     repository: "https://github.com/oigorbrazil/coding-opus",
     legacy_names: &["coding-opus", "alethe", "alethe-orchestrate"],
     agents: &["claude", "codex"],
@@ -112,6 +112,10 @@ const BUNDLED_SKILLS: [BundledSkill; 1] = [BundledSkill {
         BundledSkillFile {
             path: "references/memoria.md",
             content: include_str!("../assets/skills/coding/references/memoria.md"),
+        },
+        BundledSkillFile {
+            path: "references/modo-app.md",
+            content: include_str!("../assets/skills/coding/references/modo-app.md"),
         },
         BundledSkillFile {
             path: "references/obsidian-mcp.md",

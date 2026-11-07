@@ -4,7 +4,7 @@ description: Coding Opus melhora a performance e a economia da IA com dois pilar
 argument-hint: "[tarefa] | install | onde | consultar <termos> | registrar [título] | on | off | passive | spend | save | max | freestyle | careful | report | status | usage | models | editor | list | stop | clean | skip <fase> | switch <playbook> | freeform | budget <limite> | mark <worker> <used|partial|discarded> | setup | help"
 license: MIT
 metadata:
-  version: "24"
+  version: "25"
   codingOpus: "1"
   upstream: "Kc1t/alethe-orchestrate-skill@ab81104 + n1systempc/obsidian-second-brain@4f43c49"
 ---
@@ -69,6 +69,11 @@ etapa atual. A instalação nunca bloqueia o trabalho.
 Siga as fases da orquestração (backend, cota, playbook, plano, `dry-run`, ondas, integração e relatório).
 A memória entra em quatro pontos.
 
+**Dentro do Coding Agent** (a lista de ferramentas tem `coding_agent_delegate`), a skill planeja e o
+app executa: siga [references/modo-app.md](references/modo-app.md). Memória, playbook, escalonamento,
+relatório e registro continuam aqui; os workers sobem pelo `coding_agent_delegate`, aparecem no
+quadro do app e nunca pelo `orchestrate.py run`.
+
 ### 1. Consultar antes de planejar
 
 Antes de `playbook --pick`, rode `brain.py find` com os termos da tarefa, usando `--route` quando
@@ -95,20 +100,24 @@ Os workers nunca escrevem no second brain. Só o lead escreve, e só a pedido.
 
 ### 3. Rodar e integrar
 
-Como em [references/orquestracao.md](references/orquestracao.md): `new ... --lead <cli>:<modelo>`,
+No Coding Agent: fases do playbook viram chamadas de `coding_agent_delegate`, acompanhadas com
+`coding_agent_check` e verificadas com `coding_agent_diff` ([references/modo-app.md](references/modo-app.md)).
+
+Fora dele, como em [references/orquestracao.md](references/orquestracao.md): `new ... --lead <cli>:<modelo>`,
 `run --in current --detach`, `wait`, leitura de `outcome.json`, `result.md` e `diff.patch`, depois
 `mark` e `report`. Se um resultado contrariar uma decisão documentada, diga qual nota e pergunte
 antes de seguir.
 
 ### 4. Oferecer o registro
 
-Depois do `report`, ofereça em uma linha registrar no second brain o que foi decidido ou entregue.
+Depois do relatório (o `report` do runner ou o montado no modo app), ofereça em uma linha registrar no second brain o que foi decidido ou entregue.
 A escrita depende do ok do usuário ou de uma regra permanente dele, como
 `mode on --rule "registrar cada orquestração no second brain"`.
 
 1. Prévia: `brain.py record --title "<título>" --folder <pasta> --summary "<2-4 linhas>"
    [--type decisao|nota] [--area <área>] [--tag <projeto>] [--related "<nota>"]`. Ela anexa o
-   `report` da orquestração atual (ou `--orchestration <pasta>`). Sem pasta indicada, use
+   `report` da orquestração atual (ou `--orchestration <pasta>`); no modo app use `--no-report` e
+   ponha o relatório no resumo. Sem pasta indicada, use
    `00-Inbox`. Para um projeto, sugira `30-Projetos/<projeto>` e a tag com o nome do projeto, já que
    o second brain é compartilhado entre todos.
 2. Mostre o caminho e o resumo; com o ok, rode de novo com `--write`. O script nunca sobrescreve.
