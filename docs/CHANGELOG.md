@@ -13,7 +13,7 @@ Notable user-facing changes to **Coding Agent** are documented here. The format 
 
 ## [Unreleased]
 
-- Coding Opus skill 25: inside Coding Agent, the skill keeps memory, playbook choice, escalation and the cost report, and runs its workers through the orchestration board (`coding_agent_delegate`) instead of its own runner.
+- Coding Opus skill 26: inside Coding Agent, the skill keeps memory, playbook choice, escalation and the cost report, and runs its workers through the orchestration board (`coding_agent_delegate`) instead of its own runner. It checks quotas before delegating, always passes the working directory and treats an empty "succeeded" as a failure.
 - Rebranded as Coding Agent: new name, icons and identifier (`com.codingagent.desktop`). The bundled orchestration skill is now Coding Opus (`coding`), which adds second-brain memory. Updates, the plugin catalog and cloud sync are disabled until this project has its own infrastructure.
 
 ### Added

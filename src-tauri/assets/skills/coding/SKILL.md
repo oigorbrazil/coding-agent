@@ -4,7 +4,7 @@ description: Coding Opus melhora a performance e a economia da IA com dois pilar
 argument-hint: "[tarefa] | install | onde | consultar <termos> | registrar [título] | on | off | passive | spend | save | max | freestyle | careful | report | status | usage | models | editor | list | stop | clean | skip <fase> | switch <playbook> | freeform | budget <limite> | mark <worker> <used|partial|discarded> | setup | help"
 license: MIT
 metadata:
-  version: "25"
+  version: "26"
   codingOpus: "1"
   upstream: "Kc1t/alethe-orchestrate-skill@ab81104 + n1systempc/obsidian-second-brain@4f43c49"
 ---

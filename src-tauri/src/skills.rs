@@ -43,7 +43,7 @@ impl BundledSkill {
 /// Official skills; `npm run skill:sync` rewrites the version and the file list.
 const BUNDLED_SKILLS: [BundledSkill; 1] = [BundledSkill {
     name: "coding",
-    version: 25,
+    version: 26,
     repository: "https://github.com/oigorbrazil/coding-opus",
     legacy_names: &["coding-opus", "alethe", "alethe-orchestrate"],
     agents: &["claude", "codex"],

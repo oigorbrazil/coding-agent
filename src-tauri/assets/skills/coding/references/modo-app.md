@@ -25,21 +25,29 @@ valendo: `doctor`, `usage`, `playbook`, `playbook --pick`, `models`, `editor` e 
 
 1. **Memória.** `brain.py find <termos>`; leia até cinco notas. As decisões aplicáveis viram
    restrições dos briefs (passo 2 de "Orquestração com memória" no SKILL.md).
-2. **Estratégia.** `orchestrate.py playbook --pick` e, se precisar dos detalhes,
+2. **Cota antes de delegar.** Chame `coding_agent_status` uma vez e leia o bloco `fitness`. Um
+   fornecedor com `used` em `quota.stopAt` (95 por padrão) ou acima, ou com `rateLimited: true`, está
+   fora: workers dele terminam como `succeeded` sem fazer nada. Use o outro fornecedor e diga ao
+   usuário em uma linha qual trocou e por quê; se os dois estiverem fora, pergunte
+   (`quota.onBothCritical: ask`).
+3. **Estratégia.** `orchestrate.py playbook --pick` e, se precisar dos detalhes,
    `orchestrate.py playbook <nome>`. Fases com `who: lead` você faz nesta conversa; as demais viram
    lotes de `coding_agent_delegate`.
-3. **Traduzir cada fase em uma chamada.** Use a tabela abaixo. Mande **todas** as unidades
+4. **Traduzir cada fase em uma chamada.** Use a tabela abaixo. Mande **todas** as unidades
    independentes da fase numa única chamada (`tasks` com um brief por worker), com `label` nas
-   palavras do usuário.
-4. **Acompanhar.** `coding_agent_check` com `wait: true`; ele bloqueia no máximo 45 s, então chame
+   palavras do usuário. **Passe sempre `cwd`** com o caminho absoluto do repositório da tarefa: sem
+   ele o app usa a pasta dele, que pode não ser o projeto, e os workers trabalham no lugar errado.
+5. **Acompanhar.** `coding_agent_check` com `wait: true`; ele bloqueia no máximo 45 s, então chame
    de novo enquanto houver worker ativo e passe sempre o `ack` da resposta anterior. Leia o bloco
    `fitness`: se o fornecedor escolhido estiver acabando, use o outro na próxima fase, como manda a
    seção `quota` do playbook (`whenLow: switch-provider`).
-5. **Verificar e escalar.** Avalie pelo `gate` da fase (testes, build, critério), nunca pela
-   palavra do worker. `coding_agent_diff` mostra o que mudou. Falhou: corrija com
+6. **Verificar e escalar.** Avalie pelo `gate` da fase (testes, build, critério), nunca pela
+   palavra do worker. `coding_agent_diff` mostra o que mudou. `outcome: succeeded` com `text` vazio
+   e sem diff numa unidade que devia escrever é **falha**, não sucesso: confira `cwd` e a cota antes
+   de repetir. Falhou: corrija com
    `coding_agent_steer` se ele ainda está rodando, ou mande a próxima fase do playbook (por exemplo
    `strong-fix`) com o nível de cima. Suba um nível por vez e uma vez por unidade.
-6. **Fechar.** `coding_agent_release` para cada worker sem mais trabalho. Depois faça o relatório
+7. **Fechar.** `coding_agent_release` para cada worker sem mais trabalho. Depois faça o relatório
    (abaixo) e ofereça o registro no second brain.
 
 ## Fase do playbook → `coding_agent_delegate`
