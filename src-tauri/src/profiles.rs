@@ -1,0 +1,827 @@
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
+
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use tauri::{AppHandle, Manager};
+
+pub(crate) use crate::provider_common::now_ms;
+
+const PROFILES_DIR_NAME: &str = "profiles";
+const PROFILES_REGISTRY_FILE: &str = "profiles.json";
+pub const DEFAULT_PROFILE_ID: &str = "default";
+
+const WEBVIEW_CACHE_DIR: &str = "EBWebView";
+
+/// Serializes read-modify-write of `profiles.json` (they share one temp file). Profile deletion runs
+/// off the main thread, so it can overlap with switching, creating or renaming. Never held across a
+/// keychain call, and not taken by `ensure_profiles_index` (the lock is not re-entrant).
+static INDEX_LOCK: Mutex<()> = Mutex::new(());
+
+fn index_lock() -> MutexGuard<'static, ()> {
+    INDEX_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ProfileMeta {
+    pub id: String,
+    pub name: String,
+    pub created_at_ms: u64,
+    pub last_used_at_ms: u64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ProfilesIndex {
+    pub version: u32,
+    pub active_profile_id: String,
+    pub profiles: Vec<ProfileMeta>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ProfilesState {
+    pub active_profile_id: String,
+    pub profiles: Vec<ProfileMeta>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ProfileSummary {
+    pub id: String,
+    pub name: String,
+    pub profile_image_url: String,
+    pub created_at_ms: u64,
+    pub last_used_at_ms: u64,
+    pub project_count: usize,
+    pub terminal_count: usize,
+    pub is_active: bool,
+}
+
+fn root_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_local_data_dir()
+        .map_err(|error| error.to_string())
+}
+
+fn profiles_root_dir(root: &Path) -> PathBuf {
+    root.join(PROFILES_DIR_NAME)
+}
+
+fn registry_path(root: &Path) -> PathBuf {
+    root.join(PROFILES_REGISTRY_FILE)
+}
+
+fn profile_dir(root: &Path, id: &str) -> PathBuf {
+    profiles_root_dir(root).join(id)
+}
+
+pub fn profile_data_dir_for_id(app: &AppHandle, profile_id: &str) -> Result<PathBuf, String> {
+    let root = root_data_dir(app)?;
+    let index = ensure_profiles_index(app)?;
+    if !index
+        .profiles
+        .iter()
+        .any(|profile| profile.id == profile_id)
+    {
+        return Err("profile not found".to_string());
+    }
+    Ok(profile_dir(&root, profile_id))
+}
+
+pub fn default_profiles_index() -> ProfilesIndex {
+    let now = now_ms();
+    ProfilesIndex {
+        version: 1,
+        active_profile_id: DEFAULT_PROFILE_ID.to_string(),
+        profiles: vec![ProfileMeta {
+            id: DEFAULT_PROFILE_ID.to_string(),
+            name: "Default".to_string(),
+            created_at_ms: now,
+            last_used_at_ms: now,
+        }],
+    }
+}
+
+pub fn parse_profiles_index(raw: &str) -> Result<ProfilesIndex, String> {
+    let mut index: ProfilesIndex = serde_json::from_str(raw).map_err(|error| error.to_string())?;
+    if index.version != 1 {
+        return Err(format!(
+            "unsupported profiles index version: {}",
+            index.version
+        ));
+    }
+    if index.profiles.is_empty() {
+        return Ok(default_profiles_index());
+    }
+    if !index
+        .profiles
+        .iter()
+        .any(|profile| profile.id == index.active_profile_id)
+    {
+        index.active_profile_id = index.profiles[0].id.clone();
+    }
+    Ok(index)
+}
+
+fn write_json_atomic(path: &Path, content: &str) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, content).map_err(|error| error.to_string())?;
+    fs::rename(&tmp, path).map_err(|error| error.to_string())
+}
+
+fn profiles_state_from(index: &ProfilesIndex) -> ProfilesState {
+    let mut profiles = index.profiles.clone();
+    profiles.sort_by(|a, b| {
+        if a.id == index.active_profile_id {
+            return std::cmp::Ordering::Less;
+        }
+        if b.id == index.active_profile_id {
+            return std::cmp::Ordering::Greater;
+        }
+        b.last_used_at_ms
+            .cmp(&a.last_used_at_ms)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    ProfilesState {
+        active_profile_id: index.active_profile_id.clone(),
+        profiles,
+    }
+}
+
+fn profile_summary(
+    root: &Path,
+    profile: &ProfileMeta,
+    active_profile_id: &str,
+) -> Result<ProfileSummary, String> {
+    let projects_path = profile_dir(root, &profile.id).join("projects.json");
+    let (project_count, terminal_count, profile_image_url) = if projects_path.is_file() {
+        let raw = fs::read_to_string(projects_path).map_err(|error| error.to_string())?;
+        let value: Value = serde_json::from_str(&raw).map_err(|error| error.to_string())?;
+        let profile_image_url = value
+            .get("preferences")
+            .and_then(|preferences| preferences.get("profileImageUrl"))
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let projects = value.get("projects").and_then(Value::as_array);
+        let project_count = projects.map_or(0, Vec::len);
+        let terminal_count = projects
+            .into_iter()
+            .flat_map(|items| items.iter())
+            .filter_map(|project| project.get("terminals").and_then(Value::as_array))
+            .map(Vec::len)
+            .sum();
+        (project_count, terminal_count, profile_image_url)
+    } else {
+        (0, 0, String::new())
+    };
+
+    Ok(ProfileSummary {
+        id: profile.id.clone(),
+        name: profile.name.clone(),
+        profile_image_url,
+        created_at_ms: profile.created_at_ms,
+        last_used_at_ms: profile.last_used_at_ms,
+        project_count,
+        terminal_count,
+        is_active: profile.id == active_profile_id,
+    })
+}
+
+pub fn list_profile_summaries_state(app: &AppHandle) -> Result<Vec<ProfileSummary>, String> {
+    let root = root_data_dir(app)?;
+    let index = ensure_profiles_index(app)?;
+    let mut summaries = index
+        .profiles
+        .iter()
+        .map(|profile| profile_summary(&root, profile, &index.active_profile_id))
+        .collect::<Result<Vec<_>, _>>()?;
+    summaries.sort_by(|a, b| {
+        b.is_active
+            .cmp(&a.is_active)
+            .then_with(|| b.last_used_at_ms.cmp(&a.last_used_at_ms))
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    Ok(summaries)
+}
+
+fn load_index(root: &Path) -> Result<ProfilesIndex, String> {
+    let path = registry_path(root);
+    let raw = fs::read_to_string(&path).map_err(|error| error.to_string())?;
+    parse_profiles_index(&raw)
+}
+
+pub fn write_profiles_index(root: &Path, index: &ProfilesIndex) -> Result<(), String> {
+    let path = registry_path(root);
+    let json = serde_json::to_string_pretty(index).map_err(|error| error.to_string())?;
+    write_json_atomic(&path, &json)
+}
+
+pub fn ensure_profile_dirs(root: &Path, index: &ProfilesIndex) -> Result<(), String> {
+    fs::create_dir_all(profiles_root_dir(root)).map_err(|error| error.to_string())?;
+    for profile in &index.profiles {
+        fs::create_dir_all(profile_dir(root, &profile.id)).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+pub fn discover_profiles(root: &Path) -> Result<Option<ProfilesIndex>, String> {
+    let profiles_root = profiles_root_dir(root);
+    if !profiles_root.is_dir() {
+        return Ok(None);
+    }
+
+    let mut profiles = Vec::new();
+    for entry in fs::read_dir(&profiles_root).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let id = entry.file_name().to_string_lossy().to_string();
+        let metadata = entry.metadata().map_err(|error| error.to_string())?;
+        let created_at_ms = metadata
+            .created()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or_else(now_ms);
+        let last_used_at_ms = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or(created_at_ms);
+        profiles.push(ProfileMeta {
+            id: id.clone(),
+            name: if id == DEFAULT_PROFILE_ID {
+                "Default".to_string()
+            } else {
+                id.replace('-', " ")
+            },
+            created_at_ms,
+            last_used_at_ms,
+        });
+    }
+
+    if profiles.is_empty() {
+        return Ok(None);
+    }
+
+    profiles.sort_by(|a, b| a.id.cmp(&b.id));
+    let active_profile_id = if profiles
+        .iter()
+        .any(|profile| profile.id == DEFAULT_PROFILE_ID)
+    {
+        DEFAULT_PROFILE_ID.to_string()
+    } else {
+        profiles[0].id.clone()
+    };
+    Ok(Some(ProfilesIndex {
+        version: 1,
+        active_profile_id,
+        profiles,
+    }))
+}
+
+fn legacy_payload_exists(root: &Path) -> bool {
+    root.join("projects.json").exists()
+        || root.join("scrollback").exists()
+        || root.join("spawn.log").exists()
+        || root.join("spotify_tokens.json").exists()
+}
+
+fn copy_dir_missing(src: &Path, dst: &Path) -> Result<(), String> {
+    if !src.is_dir() {
+        return Ok(());
+    }
+    fs::create_dir_all(dst).map_err(|error| error.to_string())?;
+    for entry in fs::read_dir(src).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let src_path = entry.path();
+        let dst_path = dst.join(entry.file_name());
+        if src_path.is_dir() {
+            copy_dir_missing(&src_path, &dst_path)?;
+        } else if !dst_path.exists() {
+            fs::copy(&src_path, &dst_path).map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+fn move_entry_into_profile(src: &Path, dst: &Path) -> Result<(), String> {
+    if !src.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    if src.is_dir() {
+        copy_dir_missing(src, dst)?;
+        fs::remove_dir_all(src).map_err(|error| error.to_string())?;
+    } else if !dst.exists() {
+        fs::copy(src, dst).map_err(|error| error.to_string())?;
+        fs::remove_file(src).map_err(|error| error.to_string())?;
+    } else {
+        fs::remove_file(src).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn migrate_legacy_root(root: &Path) -> Result<(), String> {
+    let default_dir = profile_dir(root, DEFAULT_PROFILE_ID);
+    fs::create_dir_all(&default_dir).map_err(|error| error.to_string())?;
+    for entry in fs::read_dir(root).map_err(|error| error.to_string())? {
+        let entry = entry.map_err(|error| error.to_string())?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy().into_owned();
+
+        if name_str == PROFILES_REGISTRY_FILE
+            || name_str == PROFILES_DIR_NAME
+            || name_str == WEBVIEW_CACHE_DIR
+        {
+            continue;
+        }
+
+        if let Err(error) = move_entry_into_profile(&entry.path(), &default_dir.join(name)) {
+            eprintln!("profiles: skipping legacy entry {name_str}: {error}");
+        }
+    }
+    Ok(())
+}
+
+pub fn ensure_profiles_index(app: &AppHandle) -> Result<ProfilesIndex, String> {
+    let root = root_data_dir(app)?;
+    fs::create_dir_all(profiles_root_dir(&root)).map_err(|error| error.to_string())?;
+    let path = registry_path(&root);
+    if path.exists() {
+        let index = load_index(&root)?;
+        ensure_profile_dirs(&root, &index)?;
+        return Ok(index);
+    }
+
+    let mut index = if let Some(existing) = discover_profiles(&root)? {
+        existing
+    } else {
+        default_profiles_index()
+    };
+
+    if legacy_payload_exists(&root) {
+        migrate_legacy_root(&root)?;
+        index.active_profile_id = DEFAULT_PROFILE_ID.to_string();
+        if !index
+            .profiles
+            .iter()
+            .any(|profile| profile.id == DEFAULT_PROFILE_ID)
+        {
+            let now = now_ms();
+            index.profiles.push(ProfileMeta {
+                id: DEFAULT_PROFILE_ID.to_string(),
+                name: "Default".to_string(),
+                created_at_ms: now,
+                last_used_at_ms: now,
+            });
+        }
+    }
+
+    ensure_profile_dirs(&root, &index)?;
+    write_profiles_index(&root, &index)?;
+    Ok(index)
+}
+
+pub fn list_profiles_state(app: &AppHandle) -> Result<ProfilesState, String> {
+    Ok(profiles_state_from(&ensure_profiles_index(app)?))
+}
+
+pub fn set_active_profile_id(app: &AppHandle, profile_id: &str) -> Result<ProfilesState, String> {
+    let _index = index_lock();
+    let root = root_data_dir(app)?;
+    let mut index = ensure_profiles_index(app)?;
+    if !index
+        .profiles
+        .iter()
+        .any(|profile| profile.id == profile_id)
+    {
+        return Err(format!("profile not found: {profile_id}"));
+    }
+    let now = now_ms();
+    index.active_profile_id = profile_id.to_string();
+    index
+        .profiles
+        .iter_mut()
+        .filter(|profile| profile.id == profile_id)
+        .for_each(|profile| profile.last_used_at_ms = now);
+    ensure_profile_dirs(&root, &index)?;
+    write_profiles_index(&root, &index)?;
+    Ok(profiles_state_from(&index))
+}
+
+pub fn create_profile_state(
+    app: &AppHandle,
+    name: Option<String>,
+) -> Result<ProfilesState, String> {
+    let _index = index_lock();
+    let root = root_data_dir(app)?;
+    let mut index = ensure_profiles_index(app)?;
+    let id = nanoid::nanoid!(10);
+    let now = now_ms();
+    let profile_name = normalize_profile_name(name.as_deref());
+    if index
+        .profiles
+        .iter()
+        .any(|existing| existing.name.eq_ignore_ascii_case(&profile_name))
+    {
+        return Err("profile_name_exists".to_string());
+    }
+    let profile = ProfileMeta {
+        id: id.clone(),
+        name: profile_name,
+        created_at_ms: now,
+        last_used_at_ms: now,
+    };
+    index.profiles.push(profile);
+    ensure_profile_dirs(&root, &index)?;
+    write_profiles_index(&root, &index)?;
+    Ok(profiles_state_from(&index))
+}
+
+pub fn rename_profile_state(
+    app: &AppHandle,
+    profile_id: &str,
+    name: String,
+) -> Result<ProfilesState, String> {
+    let _index = index_lock();
+    let root = root_data_dir(app)?;
+    let mut index = ensure_profiles_index(app)?;
+    let updated = normalize_profile_name(Some(&name));
+    if index
+        .profiles
+        .iter()
+        .any(|profile| profile.id != profile_id && profile.name.eq_ignore_ascii_case(&updated))
+    {
+        return Err("profile_name_exists".to_string());
+    }
+    let mut found = false;
+    for profile in &mut index.profiles {
+        if profile.id == profile_id {
+            profile.name = updated.clone();
+            profile.last_used_at_ms = now_ms();
+            found = true;
+        }
+    }
+    if !found {
+        return Err(format!("profile not found: {profile_id}"));
+    }
+    ensure_profile_dirs(&root, &index)?;
+    write_profiles_index(&root, &index)?;
+    Ok(profiles_state_from(&index))
+}
+
+/// The profile to remove: `None` when it is already gone, an error when it is the last one.
+fn removal_target(index: &ProfilesIndex, profile_id: &str) -> Result<Option<ProfileMeta>, String> {
+    let Some(target) = index
+        .profiles
+        .iter()
+        .find(|profile| profile.id == profile_id)
+        .cloned()
+    else {
+        return Ok(None);
+    };
+    if index.profiles.len() <= 1 {
+        return Err("cannot delete the last local profile".to_string());
+    }
+    Ok(Some(target))
+}
+
+/// Drops a profile from the index; when it was active, the default profile (or the first left)
+/// becomes active and is marked as used.
+fn remove_from_index(index: &mut ProfilesIndex, profile_id: &str) -> Result<(), String> {
+    index.profiles.retain(|profile| profile.id != profile_id);
+    if index.active_profile_id == profile_id {
+        let fallback = index
+            .profiles
+            .iter()
+            .find(|profile| profile.id == DEFAULT_PROFILE_ID)
+            .or_else(|| index.profiles.first())
+            .cloned()
+            .ok_or_else(|| "no fallback profile available".to_string())?;
+        index.active_profile_id = fallback.id.clone();
+        for profile in &mut index.profiles {
+            if profile.id == fallback.id {
+                profile.last_used_at_ms = now_ms();
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Deletes a profile in two phases: its keychain secrets first, without the index lock (a keychain
+/// call can wait on a password prompt), then, under the lock, its folder and its index entry,
+/// re-checked against the index as it is now.
+pub fn delete_profile_state(app: &AppHandle, profile_id: &str) -> Result<ProfilesState, String> {
+    let root = root_data_dir(app)?;
+    let target = removal_target(&ensure_profiles_index(app)?, profile_id)?
+        .ok_or_else(|| format!("profile not found: {profile_id}"))?;
+    let target_dir = profile_dir(&root, &target.id);
+    if target_dir.join("github_sync.json").is_file() {
+        crate::secure_store::delete_github_sync_token(&target.id)?;
+    }
+    if target_dir.join("cloud_sync.json").is_file() {
+        crate::cloud_sync::delete_profile_session(&target.id)?;
+    }
+    crate::spotify::delete_profile_secrets(&target.id)?;
+    crate::voice_providers::keys::delete_profile_keys(&target.id)?;
+    crate::voice_providers::keys::delete_secret(
+        &target.id,
+        crate::secure_store::SecretKind::OpenrouterManagementKey,
+    )?;
+    crate::voice_servers::delete_profile_keys(&target.id, &target_dir)?;
+
+    let _index = index_lock();
+    let mut index = ensure_profiles_index(app)?;
+    if removal_target(&index, profile_id)?.is_none() {
+        // Removed meanwhile by another delete.
+        return Ok(profiles_state_from(&index));
+    }
+    if target_dir.exists() {
+        fs::remove_dir_all(&target_dir).map_err(|error| error.to_string())?;
+    }
+    remove_from_index(&mut index, profile_id)?;
+    ensure_profile_dirs(&root, &index)?;
+    write_profiles_index(&root, &index)?;
+    Ok(profiles_state_from(&index))
+}
+
+pub fn active_profile_state(app: &AppHandle) -> Result<ProfileMeta, String> {
+    let index = ensure_profiles_index(app)?;
+    let active_profile_id = index.active_profile_id.clone();
+    index
+        .profiles
+        .into_iter()
+        .find(|profile| profile.id == active_profile_id)
+        .ok_or_else(|| "active profile not found".to_string())
+}
+
+#[tauri::command]
+pub fn list_profiles(app: AppHandle) -> Result<ProfilesState, String> {
+    list_profiles_state(&app)
+}
+
+#[tauri::command]
+pub fn list_profile_summaries(app: AppHandle) -> Result<Vec<ProfileSummary>, String> {
+    list_profile_summaries_state(&app)
+}
+
+#[tauri::command]
+pub fn get_active_profile(app: AppHandle) -> Result<ProfileMeta, String> {
+    active_profile_state(&app)
+}
+
+#[tauri::command]
+pub fn set_active_profile(app: AppHandle, profile_id: String) -> Result<ProfilesState, String> {
+    set_active_profile_id(&app, &profile_id)
+}
+
+#[tauri::command]
+pub fn create_profile(app: AppHandle, name: Option<String>) -> Result<ProfilesState, String> {
+    create_profile_state(&app, name)
+}
+
+#[tauri::command]
+pub fn rename_profile(
+    app: AppHandle,
+    profile_id: String,
+    name: String,
+) -> Result<ProfilesState, String> {
+    rename_profile_state(&app, &profile_id, name)
+}
+
+/// Deleting a profile removes its keychain secrets, and a keychain call can wait on a password
+/// prompt (or on a pending voice key read), so it runs on the blocking pool instead of the main
+/// thread that sync commands use.
+#[tauri::command]
+pub async fn delete_profile(app: AppHandle, profile_id: String) -> Result<ProfilesState, String> {
+    crate::voice_providers::keys::blocking(move || delete_profile_state(&app, &profile_id)).await
+}
+
+fn normalize_profile_name(name: Option<&str>) -> String {
+    let trimmed = name.unwrap_or_default().trim();
+    if trimmed.is_empty() {
+        "Untitled profile".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_root(label: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("coding-agent-profiles-{label}-{}", nanoid::nanoid!(8)));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn meta(id: &str, last_used_at_ms: u64) -> ProfileMeta {
+        ProfileMeta {
+            id: id.to_string(),
+            name: id.to_string(),
+            created_at_ms: 0,
+            last_used_at_ms,
+        }
+    }
+
+    #[test]
+    fn parse_rejects_unknown_version() {
+        let raw = r#"{"version":2,"active_profile_id":"a","profiles":[]}"#;
+        assert!(parse_profiles_index(raw).is_err());
+    }
+
+    #[test]
+    fn parse_falls_back_to_default_when_empty() {
+        let raw = r#"{"version":1,"active_profile_id":"x","profiles":[]}"#;
+        let index = parse_profiles_index(raw).unwrap();
+        assert_eq!(index.active_profile_id, DEFAULT_PROFILE_ID);
+        assert_eq!(index.profiles.len(), 1);
+    }
+
+    #[test]
+    fn parse_repairs_dangling_active_id() {
+        let index = ProfilesIndex {
+            version: 1,
+            active_profile_id: "gone".into(),
+            profiles: vec![meta("work", 1), meta("home", 2)],
+        };
+        let raw = serde_json::to_string(&index).unwrap();
+        assert_eq!(
+            parse_profiles_index(&raw).unwrap().active_profile_id,
+            "work"
+        );
+    }
+
+    #[test]
+    fn state_lists_active_first_then_most_recent() {
+        let index = ProfilesIndex {
+            version: 1,
+            active_profile_id: "old".into(),
+            profiles: vec![meta("new", 30), meta("old", 10), meta("mid", 20)],
+        };
+        let ids: Vec<_> = profiles_state_from(&index)
+            .profiles
+            .into_iter()
+            .map(|profile| profile.id)
+            .collect();
+        assert_eq!(ids, ["old", "new", "mid"]);
+    }
+
+    #[test]
+    fn summary_counts_projects_and_terminals() {
+        let root = temp_root("summary");
+        let dir = profile_dir(&root, "p");
+        fs::create_dir_all(&dir).unwrap();
+        let projects = serde_json::json!({
+            "preferences": { "profileImageUrl": "img" },
+            "projects": [{ "terminals": [1, 2] }, { "terminals": [3] }, {}],
+        });
+        fs::write(dir.join("projects.json"), projects.to_string()).unwrap();
+        let summary = profile_summary(&root, &meta("p", 0), "p").unwrap();
+        assert_eq!((summary.project_count, summary.terminal_count), (3, 3));
+        assert_eq!(summary.profile_image_url, "img");
+        assert!(summary.is_active);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn discover_prefers_default_profile() {
+        let root = temp_root("discover");
+        assert!(discover_profiles(&root).unwrap().is_none());
+        for id in ["alpha", DEFAULT_PROFILE_ID, "my-work"] {
+            fs::create_dir_all(profile_dir(&root, id)).unwrap();
+        }
+        let index = discover_profiles(&root).unwrap().unwrap();
+        assert_eq!(index.active_profile_id, DEFAULT_PROFILE_ID);
+        let work = index.profiles.iter().find(|p| p.id == "my-work").unwrap();
+        assert_eq!(work.name, "my work");
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn legacy_migration_moves_data_and_keeps_registry_and_webview() {
+        let root = temp_root("legacy");
+        fs::write(root.join("projects.json"), "{}").unwrap();
+        fs::write(root.join(PROFILES_REGISTRY_FILE), "{}").unwrap();
+        fs::create_dir_all(root.join("scrollback")).unwrap();
+        fs::write(root.join("scrollback").join("a.bin"), "x").unwrap();
+        fs::create_dir_all(root.join(WEBVIEW_CACHE_DIR)).unwrap();
+        assert!(legacy_payload_exists(&root));
+
+        migrate_legacy_root(&root).unwrap();
+
+        let default_dir = profile_dir(&root, DEFAULT_PROFILE_ID);
+        assert!(default_dir.join("projects.json").is_file());
+        assert!(default_dir.join("scrollback").join("a.bin").is_file());
+        assert!(root.join(PROFILES_REGISTRY_FILE).is_file());
+        assert!(root.join(WEBVIEW_CACHE_DIR).is_dir());
+        assert!(!legacy_payload_exists(&root));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn moving_into_profile_never_overwrites_existing_files() {
+        let root = temp_root("move");
+        let src = root.join("projects.json");
+        let dst = root.join("profile").join("projects.json");
+        fs::create_dir_all(dst.parent().unwrap()).unwrap();
+        fs::write(&src, "legacy").unwrap();
+        fs::write(&dst, "current").unwrap();
+        move_entry_into_profile(&src, &dst).unwrap();
+        assert_eq!(fs::read_to_string(&dst).unwrap(), "current");
+        assert!(!src.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn index_round_trips_through_disk() {
+        let root = temp_root("roundtrip");
+        let index = default_profiles_index();
+        write_profiles_index(&root, &index).unwrap();
+        let loaded = load_index(&root).unwrap();
+        assert_eq!(loaded.active_profile_id, index.active_profile_id);
+        assert!(!registry_path(&root).with_extension("json.tmp").exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn profile_names_are_trimmed_with_fallback() {
+        assert_eq!(normalize_profile_name(Some("  Work ")), "Work");
+        assert_eq!(normalize_profile_name(Some("   ")), "Untitled profile");
+        assert_eq!(normalize_profile_name(None), "Untitled profile");
+    }
+
+    fn index(active: &str, ids: &[&str]) -> ProfilesIndex {
+        ProfilesIndex {
+            version: 1,
+            active_profile_id: active.to_string(),
+            profiles: ids.iter().map(|id| meta(id, 1)).collect(),
+        }
+    }
+
+    #[test]
+    fn a_profile_can_be_removed_only_while_another_one_remains() {
+        let two = index("a", &[DEFAULT_PROFILE_ID, "a"]);
+        assert_eq!(
+            removal_target(&two, "a").unwrap().map(|p| p.id),
+            Some("a".into())
+        );
+        assert_eq!(removal_target(&two, "gone").unwrap().map(|p| p.id), None);
+        let one = index("a", &["a"]);
+        assert!(removal_target(&one, "a").is_err());
+    }
+
+    #[test]
+    fn removing_the_active_profile_falls_back_to_default() {
+        let mut idx = index("a", &["b", DEFAULT_PROFILE_ID, "a"]);
+        remove_from_index(&mut idx, "a").unwrap();
+        assert_eq!(idx.active_profile_id, DEFAULT_PROFILE_ID);
+        assert_eq!(idx.profiles.len(), 2);
+        assert!(idx.profiles.iter().all(|p| p.id != "a"));
+        let fallback = idx
+            .profiles
+            .iter()
+            .find(|p| p.id == DEFAULT_PROFILE_ID)
+            .unwrap();
+        assert!(
+            fallback.last_used_at_ms > 1,
+            "the fallback is marked as used"
+        );
+    }
+
+    #[test]
+    fn removing_the_active_profile_without_default_picks_the_first() {
+        let mut idx = index("a", &["b", "a"]);
+        remove_from_index(&mut idx, "a").unwrap();
+        assert_eq!(idx.active_profile_id, "b");
+    }
+
+    #[test]
+    fn removing_another_profile_keeps_the_active_one() {
+        let mut idx = index("b", &["b", "a"]);
+        remove_from_index(&mut idx, "a").unwrap();
+        assert_eq!(idx.active_profile_id, "b");
+        assert_eq!(idx.profiles[0].last_used_at_ms, 1);
+    }
+
+    #[test]
+    fn the_index_lock_survives_a_panic_while_held() {
+        let _ = std::thread::spawn(|| {
+            let _guard = index_lock();
+            panic!("poison the lock");
+        })
+        .join();
+        drop(index_lock());
+    }
+}

@@ -1,0 +1,39 @@
+{
+  "schema": 1,
+  "plugins": [
+    {
+      "id": "example.notes",
+      "name": "Scratch Notes",
+      "description": "A scratchpad in the left sidebar. Demonstrates translated strings and a command.",
+      "author": "Coding Agent",
+      "repo": "oigorbrazil/coding-agent",
+      "downloadUrl": "https://github.com/oigorbrazil/coding-agent/tree/main/docs/examples/notes-plugin",
+      "version": "1.0.0",
+      "minApiVersion": 1,
+      "capabilities": ["ui.sidebarTab", "ui.command"]
+    }
+  ],
+  "builtIn": [
+    {
+      "id": "coding-agent.theme-pack",
+      "name": "Theme Pack",
+      "description": "Ember, Golden Premium, Dark Lemon and Orca.",
+      "version": "1.0.0",
+      "capabilities": ["ui.theme"]
+    },
+    {
+      "id": "coding-agent.git-control",
+      "name": "Git Control",
+      "description": "Source control panel: status, staging, commits, branches and the commit graph.",
+      "version": "1.0.0",
+      "capabilities": ["ui.sidebarTab", "ui.command", "invoke:git_*", "invoke:worktree_*"]
+    },
+    {
+      "id": "coding-agent.todos",
+      "name": "Todo List",
+      "description": "A checklist in the right sidebar, with tags and per-project assignment.",
+      "version": "1.0.0",
+      "capabilities": ["ui.sidebarTab", "ui.command", "ui.modal", "invoke:ensure_todo_template"]
+    }
+  ]
+}

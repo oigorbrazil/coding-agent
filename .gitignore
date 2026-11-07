@@ -1,0 +1,55 @@
+node_modules/
+dist/
+dist-ssr/
+.vite/
+.turbo/
+.cache/
+coverage/
+*.local
+.env
+.env.*
+!.env.example
+
+# Editor
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+Thumbs.db
+
+# Tauri
+src-tauri/target/
+# npm run test:e2e:build sets CARGO_TARGET_DIR=target-e2e (multi-GB).
+src-tauri/target-e2e/
+# Tests run here while `tauri dev` holds a lock on target/'s coding-agent.exe.
+src-tauri/target-test/
+src-tauri/gen/
+# SwiftPM build output of the macOS speech bridge.
+src-tauri/swift/CodingAgentSpeech/.build/
+
+# libghostty pré-buildado — não versionado (binário ~39MB). Reconstruído por
+# src-tauri/vendor/fetch-ghostty.sh (URL + checksum pinados).
+src-tauri/vendor/GhosttyKit.xcframework/
+src-tauri/WixTools/
+src-tauri/*.log
+src-tauri/**/*.pdb
+src-tauri/**/*.msi
+src-tauri/**/*.exe
+src-tauri/**/*.dmg
+src-tauri/**/*.app
+src-tauri/**/*.AppImage
+src-tauri/**/*.deb
+src-tauri/**/*.rpm
+
+# App-written project marker: dev-server logs and worktree state.
+.coding-agent/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+
+graphify-out/

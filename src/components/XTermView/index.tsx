@@ -1,0 +1,667 @@
+import '@xterm/xterm/css/xterm.css'
+
+import type { Terminal } from '@xterm/xterm'
+import {
+  AppWindow,
+  Copy,
+  ExternalLink,
+  FolderOpen,
+  LayoutGrid,
+  Maximize2,
+  PanelRight,
+  X,
+} from 'lucide-react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
+
+import { cliPathMatchesAgent } from '../../lib/agentCliPath'
+import { normalizeBrowserUrl } from '../../lib/browserUrl'
+import { noteCodexPaneInput } from '../../lib/codexSessionTracking'
+import { pickFile } from '../../lib/dialog'
+import { getLocale, translate, useT } from '../../lib/i18n'
+import { writeScopedStorage } from '../../lib/storageNamespace'
+import {
+  findRelativePath,
+  homeDirectory,
+  openInBrowser,
+  openInFileExplorer,
+  writeClipboardText,
+  writePty,
+} from '../../lib/tauri'
+import { agentLabel, resolveAgentCliCommand } from '../../lib/agentProviders'
+import type { AgentRuntimeProfile, AgentType, Theme } from '../../lib/types'
+import { wslTargetFor } from '../../lib/wsl'
+import { useProjectsStore } from '../../stores/projectsStore'
+import { useUiStore } from '../../stores/uiStore'
+import { AgentInstallButton } from '../AgentInstall/AgentInstallButton'
+import { DotmCircular2 } from '../ui/dotm-circular-2'
+import {
+  type DetectedTerminalLink,
+  relativeTerminalPath,
+  resolveTerminalFilePath,
+} from './terminalLinks'
+import { applyPromptHistoryInput, loadPromptHistory, PROMPT_HISTORY_KEY } from './terminalWrite'
+import { useXtermSession } from './useXtermSession'
+import { getXtermTheme, type LinkActionState } from './xtermThemes'
+import styles from './XTermView.module.css'
+
+export type XTermViewProps = {
+  ptyId: string
+
+  projectId?: string
+
+  command?: AgentType | null
+  cwd?: string | null
+  extraArgs?: string[]
+  runAsAdmin?: boolean
+
+  initialInput?: string
+  /** Identidade persistida da conversa deste pane. */
+  sessionId?: string
+
+  sessionKey?: string
+
+  env?: Record<string, string>
+
+  graphifyRepo?: string | null
+
+  gsdWatcherEnabled?: boolean
+
+  trustSessionId?: boolean
+
+  readOnly?: boolean
+  runtimeProfile?: AgentRuntimeProfile
+  useRouter9?: boolean
+  terminalTheme?: Theme
+  onSpawned?: (id: string) => void
+  onSessionId?: (id: string | undefined) => void
+  onInitialInputSent?: () => void
+  onExit?: (code: number | null) => void
+  onLaunchError?: (error: unknown) => void
+  onAgentComplete?: () => void
+}
+
+const LINK_MENU_WIDTH = 272
+const LINK_MENU_MAX_HEIGHT = 276
+const LINK_MENU_MARGIN = 10
+const LINK_MENU_OFFSET = 6
+
+export function XTermView({
+  ptyId,
+  projectId,
+  command,
+  cwd,
+  extraArgs,
+  runAsAdmin,
+  initialInput,
+  sessionId,
+  sessionKey,
+  env,
+  graphifyRepo,
+  gsdWatcherEnabled,
+  trustSessionId,
+  readOnly,
+
+  runtimeProfile = 'lean',
+  useRouter9 = false,
+  terminalTheme = 'dark',
+  onSpawned,
+  onSessionId,
+  onInitialInputSent,
+  onExit,
+  onLaunchError,
+  onAgentComplete,
+}: XTermViewProps) {
+  const t = useT()
+  const containerRef = useRef<HTMLDivElement | null>(null)
+  const terminalRef = useRef<Terminal | null>(null)
+  const ptyIdRef = useRef<string | null>(null)
+  const lastCtrlCRef = useRef(0)
+  const linkMenuRef = useRef<HTMLDivElement | null>(null)
+  const linkActionsRef = useRef<LinkActionState | null>(null)
+
+  const cliPathOverride = useProjectsStore((s) =>
+    command && command !== 'shell' ? (s.cliPaths[command] ?? null) : null,
+  )
+  const setCliPath = useProjectsStore((s) => s.setCliPath)
+  const wslEnabled = useProjectsStore((s) => s.preferences.enabledFeatures.wsl)
+  const wslTarget = wslTargetFor(cwd, wslEnabled)
+
+  const onSpawnedRef = useRef(onSpawned)
+  const onSessionIdRef = useRef(onSessionId)
+  const onInitialInputSentRef = useRef(onInitialInputSent)
+  const onExitRef = useRef(onExit)
+  const onLaunchErrorRef = useRef(onLaunchError)
+  const onAgentCompleteRef = useRef(onAgentComplete)
+  useEffect(() => {
+    onSpawnedRef.current = onSpawned
+    onSessionIdRef.current = onSessionId
+    onInitialInputSentRef.current = onInitialInputSent
+    onExitRef.current = onExit
+    onLaunchErrorRef.current = onLaunchError
+    onAgentCompleteRef.current = onAgentComplete
+  })
+
+  const promptHistoryRef = useRef<string[]>([])
+  const historyCursorRef = useRef(-1)
+  const currentLineRef = useRef('')
+  const promptHistoryOverflowRef = useRef(false)
+
+  const spawnedAtRef = useRef(0)
+  const usedResumeRef = useRef(false)
+  const earlyExitRetriedRef = useRef(false)
+  const forceFreshRef = useRef(false)
+
+  const [commandNotFound, setCommandNotFound] = useState<string | null>(null)
+  const [retryKey, setRetryKey] = useState(0)
+  const [bootPhase, setBootPhase] = useState<
+    'preparing' | 'queued' | 'spawning' | 'attaching' | 'ready'
+  >('preparing')
+  const [memoryWait, setMemoryWait] = useState<{
+    availableMb: number
+    waitedMs: number
+    thresholdMb: number
+  } | null>(null)
+  const [linkActions, setLinkActions] = useState<LinkActionState | null>(null)
+  const [dropActive, setDropActive] = useState(false)
+  const sessionPersistenceKey = sessionKey ?? ptyId
+
+  // Bumped on every open and close, so a slow path lookup cannot reopen or retarget the menu.
+  const linkMenuRequestRef = useRef(0)
+
+  const hideLinkActions = useCallback(() => {
+    linkMenuRequestRef.current += 1
+    setLinkActions(null)
+  }, [])
+
+  // Read when a link is clicked, not captured: the link provider keeps the menu callback it was
+  // registered with, and the home folder only arrives after mount.
+  const homeRef = useRef<string | null>(null)
+  useEffect(() => {
+    void homeDirectory()
+      .then((home) => {
+        homeRef.current = home
+      })
+      .catch(() => undefined)
+  }, [])
+
+  // estimativa conservadora do tamanho para nunca cortar o menu na viewport.
+  const showLinkActionsMenu = useCallback(
+    (event: MouseEvent, link: DetectedTerminalLink) => {
+      event.preventDefault()
+      event.stopPropagation()
+
+      terminalRef.current?.clearSelection()
+      window.getSelection()?.removeAllRanges()
+
+      const maxLeft = window.innerWidth - LINK_MENU_WIDTH - LINK_MENU_MARGIN
+      const x = Math.max(LINK_MENU_MARGIN, Math.min(event.clientX + LINK_MENU_OFFSET, maxLeft))
+      const below = event.clientY + LINK_MENU_OFFSET
+      const y =
+        below + LINK_MENU_MAX_HEIGHT <= window.innerHeight - LINK_MENU_MARGIN
+          ? below
+          : Math.max(LINK_MENU_MARGIN, event.clientY - LINK_MENU_MAX_HEIGHT - LINK_MENU_OFFSET)
+
+      const target =
+        link.kind === 'path'
+          ? resolveTerminalFilePath(link.target, cwd, homeRef.current)
+          : link.target
+      const request = ++linkMenuRequestRef.current
+      const show = (resolved: string) =>
+        request === linkMenuRequestRef.current &&
+        setLinkActions({
+          text: link.text,
+          target: resolved,
+          kind: link.kind,
+          fileKind: link.fileKind,
+          x,
+          y,
+        })
+      const relative = link.kind === 'path' && cwd ? relativeTerminalPath(link.target) : null
+      if (!cwd || relative === null) {
+        show(target)
+        return
+      }
+      // Agents often write in another worktree of the project while the pane stays in the main one.
+      void findRelativePath(cwd, relative).then(
+        (found) => show(found ?? target),
+        () => show(target),
+      )
+    },
+    [cwd],
+  )
+
+  useEffect(() => {
+    linkActionsRef.current = linkActions
+  }, [linkActions])
+
+  useEffect(() => {
+    if (!linkActions) return
+
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (!linkMenuRef.current?.contains(event.target as Node)) hideLinkActions()
+    }
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') hideLinkActions()
+    }
+
+    document.addEventListener('pointerdown', closeOnOutsidePointer, true)
+    window.addEventListener('keydown', closeOnEscape, true)
+    window.addEventListener('blur', hideLinkActions)
+    window.addEventListener('resize', hideLinkActions)
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutsidePointer, true)
+      window.removeEventListener('keydown', closeOnEscape, true)
+      window.removeEventListener('blur', hideLinkActions)
+      window.removeEventListener('resize', hideLinkActions)
+    }
+  }, [hideLinkActions, linkActions])
+
+  const openFileInGrid = useCallback(
+    (target: string) => {
+      if (!projectId) return
+      useProjectsStore.getState().createFilePane(projectId, { filePath: target })
+    },
+    [projectId],
+  )
+
+  const openUrlInGrid = useCallback(
+    (target: string) => {
+      if (!projectId) return
+      const url = normalizeBrowserUrl(target)
+      if (!url) return
+      useProjectsStore.getState().createWebPane(projectId, { url })
+      useUiStore.getState().setActiveView('workspace')
+    },
+    [projectId],
+  )
+
+  const openLinkInAppViewer = useCallback((target: string) => {
+    useUiStore.getState().openLinkViewer(target)
+  }, [])
+
+  const openLinkInBrowser = useCallback(async (target: string) => {
+    try {
+      await openInBrowser(target)
+    } catch (err) {
+      useUiStore.getState().pushToast({
+        title: translate(getLocale(), 'xterm.toastOpenBrowserFail'),
+        body: String(err),
+      })
+    }
+  }, [])
+
+  const openLinkInFolder = useCallback(async (target: string) => {
+    try {
+      await openInFileExplorer(target)
+    } catch (err) {
+      useUiStore.getState().pushToast({
+        title: translate(getLocale(), 'xterm.toastOpenFolderFail'),
+        body: String(err),
+      })
+    }
+  }, [])
+
+  const copyLinkText = useCallback(async (target: string) => {
+    try {
+      await writeClipboardText(target)
+      useUiStore.getState().pushToast({
+        title: translate(getLocale(), 'xterm.toastCopied'),
+        body: target,
+      })
+    } catch (err) {
+      useUiStore.getState().pushToast({
+        title: translate(getLocale(), 'xterm.toastCopyFail'),
+        body: String(err),
+      })
+    }
+  }, [])
+
+  useEffect(() => {
+    try {
+      promptHistoryRef.current = loadPromptHistory(ptyId)
+    } catch {
+      promptHistoryRef.current = []
+    }
+    historyCursorRef.current = -1
+    currentLineRef.current = ''
+    promptHistoryOverflowRef.current = false
+  }, [ptyId])
+
+  const recordPromptInput = (data: string): boolean => {
+    const state = {
+      currentLine: currentLineRef.current,
+      overflow: promptHistoryOverflowRef.current,
+      history: promptHistoryRef.current,
+    }
+    let startsNewSession = false
+    const historyChanged = applyPromptHistoryInput(state, data, (line) => {
+      if (line === '/new') startsNewSession = true
+      if (command === 'codex' && ptyIdRef.current) noteCodexPaneInput(ptyIdRef.current, line)
+    })
+    currentLineRef.current = state.currentLine
+    promptHistoryOverflowRef.current = state.overflow
+    if (data.includes('\r') || data.includes('\n')) historyCursorRef.current = -1
+    if (!historyChanged) return startsNewSession
+    try {
+      writeScopedStorage(PROMPT_HISTORY_KEY(ptyId), JSON.stringify(state.history))
+    } catch {
+      /* Ignore unavailable or full browser storage. */
+    }
+    return startsNewSession
+  }
+
+  const navigateHistory = (direction: 'up' | 'down') => {
+    const history = promptHistoryRef.current
+    const id = ptyIdRef.current
+    if (history.length === 0 || !id) return
+    let cursor = historyCursorRef.current
+    if (cursor === -1) cursor = direction === 'up' ? history.length - 1 : history.length
+    else cursor = direction === 'up' ? cursor - 1 : cursor + 1
+    cursor = Math.max(0, Math.min(history.length, cursor))
+    historyCursorRef.current = cursor
+    const entry = history[cursor] ?? ''
+    void writePty(id, `\x15${entry}`)
+    currentLineRef.current = entry
+    promptHistoryOverflowRef.current = false
+  }
+
+  useXtermSession({
+    ptyId,
+    command,
+    cwd,
+    extraArgs,
+    runAsAdmin,
+    initialInput,
+    sessionId,
+    env,
+    graphifyRepo,
+    gsdWatcherEnabled,
+    trustSessionId,
+    readOnly,
+    runtimeProfile,
+    useRouter9,
+    terminalTheme,
+    cliPathOverride,
+    sessionPersistenceKey,
+    retryKey,
+    containerRef,
+    terminalRef,
+    ptyIdRef,
+    lastCtrlCRef,
+    linkActionsRef,
+    spawnedAtRef,
+    usedResumeRef,
+    earlyExitRetriedRef,
+    forceFreshRef,
+    onSpawnedRef,
+    onSessionIdRef,
+    onInitialInputSentRef,
+    onExitRef,
+    onLaunchErrorRef,
+    onAgentCompleteRef,
+    setBootPhase,
+    setMemoryWait,
+    setCommandNotFound,
+    setLinkActions,
+    setRetryKey,
+    setDropActive,
+    showLinkActionsMenu,
+    recordPromptInput,
+    navigateHistory,
+  })
+
+  useEffect(() => {
+    const terminal = terminalRef.current
+    if (!terminal) return
+    terminal.options.theme = getXtermTheme(terminalTheme)
+    // Swapping the palette alone leaves already-painted rows on the previous colours.
+    terminal.refresh(0, terminal.rows - 1)
+  }, [terminalTheme])
+
+  const configurePath = useCallback(
+    async (agent: AgentType) => {
+      const picked = await pickFile({
+        title: `Select the ${agent} executable`,
+        filters: [
+          { name: 'Executable', extensions: ['cmd', 'exe', 'bat', 'ps1'] },
+          { name: 'All files', extensions: ['*'] },
+        ],
+      })
+      if (!picked) return
+      if (!cliPathMatchesAgent(agent, picked)) {
+        useUiStore.getState().pushToast({
+          title: translate(getLocale(), 'prefs.cliPathMismatch'),
+          body: translate(getLocale(), 'prefs.cliPathMismatchBody', {
+            agent,
+            command: resolveAgentCliCommand(agent) ?? agent,
+          }),
+        })
+        return
+      }
+      setCliPath(agent, picked)
+      setCommandNotFound(null)
+      setRetryKey((v) => v + 1)
+    },
+    [setCliPath],
+  )
+
+  const bootLabel = memoryWait
+    ? t('term.bootMemoryWait', {
+        available: Math.round(memoryWait.availableMb),
+        threshold: Math.round(memoryWait.thresholdMb),
+        seconds: Math.floor(memoryWait.waitedMs / 1000),
+      })
+    : bootPhase === 'preparing'
+      ? t('term.bootPreparing')
+      : bootPhase === 'queued'
+        ? t('term.bootQueued')
+        : bootPhase === 'spawning'
+          ? t('term.bootSpawning')
+          : bootPhase === 'attaching'
+            ? t('term.bootAttaching')
+            : null
+
+  return (
+    <>
+      <div
+        ref={containerRef}
+        className={`${styles.host} ${dropActive ? styles.dropActive : ''}`}
+        style={{ background: getXtermTheme(terminalTheme).background }}
+      />
+      {bootLabel && !commandNotFound ? (
+        <div className={styles.bootOverlay}>
+          <DotmCircular2
+            size={26}
+            dotSize={2}
+            cellPadding={1}
+            speed={1.2}
+            bloom
+            ariaLabel={bootLabel}
+            className={styles.bootSpinner}
+          />
+          <div className={styles.bootLabel}>{bootLabel}</div>
+        </div>
+      ) : null}
+      {commandNotFound ? (
+        <div className={styles.overlay}>
+          <div className={styles.overlayText}>
+            {t('xterm.notFoundTitle', { agent: commandNotFound })}
+          </div>
+          <AgentInstallButton
+            agent={commandNotFound as AgentType}
+            label={agentLabel(commandNotFound)}
+            onInstalled={() => setRetryKey((value) => value + 1)}
+            cwd={cwd}
+          />
+          {wslTarget ? null : (
+            <button
+              type="button"
+              className={styles.overlayBtn}
+              onClick={() => void configurePath(commandNotFound as AgentType)}
+            >
+              {t('xterm.configurePath')}
+            </button>
+          )}
+        </div>
+      ) : null}
+      {linkActions
+        ? createPortal(
+            <div
+              ref={linkMenuRef}
+              className={styles.linkMenu}
+              style={{ left: linkActions.x, top: linkActions.y }}
+              role="menu"
+              aria-label={t('xterm.linkMenu')}
+              onPointerDown={(event) => {
+                event.stopPropagation()
+                if (event.target === event.currentTarget) event.preventDefault()
+              }}
+            >
+              <div className={styles.linkMenuHeader}>
+                <span className={styles.linkMenuText} title={linkActions.text}>
+                  {linkActions.text}
+                </span>
+                <button
+                  type="button"
+                  className={styles.linkMenuClose}
+                  onClick={hideLinkActions}
+                  title={t('common.close')}
+                  aria-label={t('common.close')}
+                >
+                  <X size={14} />
+                </button>
+              </div>
+              <div className={styles.linkMenuItems}>
+                {(linkActions.fileKind === 'markdown' ||
+                  linkActions.fileKind === 'text' ||
+                  linkActions.fileKind === 'video' ||
+                  linkActions.fileKind === 'image') &&
+                projectId ? (
+                  <button
+                    type="button"
+                    className={styles.linkMenuItem}
+                    role="menuitem"
+                    onClick={() => {
+                      openFileInGrid(linkActions.target)
+                      hideLinkActions()
+                    }}
+                  >
+                    <LayoutGrid size={15} />
+                    <span>{t('xterm.openInGrid')}</span>
+                  </button>
+                ) : null}
+                {linkActions.kind === 'url' && projectId ? (
+                  <button
+                    type="button"
+                    className={styles.linkMenuItem}
+                    role="menuitem"
+                    onClick={() => {
+                      openUrlInGrid(linkActions.target)
+                      hideLinkActions()
+                    }}
+                  >
+                    <LayoutGrid size={15} />
+                    <span>{t('xterm.openInGrid')}</span>
+                  </button>
+                ) : null}
+                {linkActions.kind === 'url' || linkActions.fileKind === 'video' ? (
+                  <button
+                    type="button"
+                    className={styles.linkMenuItem}
+                    role="menuitem"
+                    onClick={() => {
+                      openLinkInAppViewer(linkActions.target)
+                      hideLinkActions()
+                    }}
+                  >
+                    <AppWindow size={15} />
+                    <span>
+                      {t(linkActions.fileKind === 'video' ? 'xterm.playInApp' : 'xterm.openInApp')}
+                    </span>
+                  </button>
+                ) : null}
+                {linkActions.fileKind === 'markdown' ? (
+                  <>
+                    <button
+                      type="button"
+                      className={styles.linkMenuItem}
+                      role="menuitem"
+                      onClick={() => {
+                        openLinkInAppViewer(linkActions.target)
+                        hideLinkActions()
+                      }}
+                    >
+                      <Maximize2 size={15} />
+                      <span>{t('xterm.openMarkdownFullscreen')}</span>
+                    </button>
+                    <button
+                      type="button"
+                      className={styles.linkMenuItem}
+                      role="menuitem"
+                      onClick={() => {
+                        useUiStore
+                          .getState()
+                          .openMarkdownSidebar(
+                            linkActions.target,
+                            linkActions.text.split(/[\\/]/).pop(),
+                          )
+                        useProjectsStore.getState().setPreferences({ rightSidebarVisible: true })
+                        hideLinkActions()
+                      }}
+                    >
+                      <PanelRight size={15} />
+                      <span>{t('xterm.openMarkdownSidebar')}</span>
+                    </button>
+                  </>
+                ) : null}
+                <button
+                  type="button"
+                  className={styles.linkMenuItem}
+                  role="menuitem"
+                  onClick={() => {
+                    void openLinkInBrowser(linkActions.target)
+                    hideLinkActions()
+                  }}
+                >
+                  <ExternalLink size={15} />
+                  <span>
+                    {t(
+                      linkActions.kind === 'url' ? 'xterm.openInBrowser' : 'xterm.openInDefaultApp',
+                    )}
+                  </span>
+                </button>
+                {linkActions.kind === 'path' ? (
+                  <button
+                    type="button"
+                    className={styles.linkMenuItem}
+                    role="menuitem"
+                    onClick={() => {
+                      void openLinkInFolder(linkActions.target)
+                      hideLinkActions()
+                    }}
+                  >
+                    <FolderOpen size={15} />
+                    <span>{t('xterm.openInFolder')}</span>
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  className={styles.linkMenuItem}
+                  role="menuitem"
+                  onClick={() => {
+                    void copyLinkText(linkActions.target)
+                    hideLinkActions()
+                  }}
+                >
+                  <Copy size={15} />
+                  <span>{t('xterm.copy')}</span>
+                </button>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
+    </>
+  )
+}

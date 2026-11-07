@@ -1,0 +1,378 @@
+import { FocusScope } from '@radix-ui/react-focus-scope'
+import { Check, ChevronDown, Search } from 'lucide-react'
+import {
+  type KeyboardEvent,
+  type ReactNode,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react'
+import { createPortal } from 'react-dom'
+
+import styles from './Dropdown.module.css'
+
+export type DropdownOption = {
+  value: string
+  label: ReactNode
+  disabled?: boolean
+  searchText?: string
+}
+
+type DropdownProps = {
+  value: string
+  options: DropdownOption[]
+  onChange: (value: string) => void
+  ariaLabel: string
+  id?: string
+  placeholder?: ReactNode
+  displayValue?: ReactNode
+  disabled?: boolean
+  className?: string
+  rootClassName?: string
+  title?: string
+  searchable?: boolean
+  searchPlaceholder?: string
+  emptyLabel?: ReactNode | ((query: string) => ReactNode)
+  allowCustomValue?: boolean
+  customOptionLabel?: (value: string) => ReactNode
+}
+
+export function Dropdown({
+  value,
+  options,
+  onChange,
+  ariaLabel,
+  id,
+  placeholder,
+  displayValue,
+  disabled = false,
+  className,
+  rootClassName,
+  title,
+  searchable = false,
+  searchPlaceholder,
+  emptyLabel,
+  allowCustomValue = false,
+  customOptionLabel,
+}: DropdownProps) {
+  const [open, setOpen] = useState(false)
+  const [search, setSearch] = useState('')
+  const [activeIndex, setActiveIndex] = useState(-1)
+  const [position, setPosition] = useState({ left: 0, top: 0, width: 220, maxHeight: 240 })
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const searchRef = useRef<HTMLInputElement>(null)
+  const listboxId = useId()
+  const selected = options.find((option) => option.value === value)
+  const selectedLabel = displayValue ?? selected?.label ?? placeholder ?? ''
+  const showsPlaceholder = displayValue === undefined && !selected && placeholder !== undefined
+  const normalizedSearch = search.trim().toLocaleLowerCase()
+  const visibleOptions = normalizedSearch
+    ? options.filter((option) => {
+        const candidate =
+          option.searchText ??
+          (typeof option.label === 'string' ? `${option.label} ${option.value}` : option.value)
+        return candidate.toLocaleLowerCase().includes(normalizedSearch)
+      })
+    : options
+  const hasExactMatch = options.some((option) => {
+    const label = typeof option.label === 'string' ? option.label : ''
+    return (
+      option.value.toLocaleLowerCase() === normalizedSearch ||
+      label.toLocaleLowerCase() === normalizedSearch
+    )
+  })
+  const showCustomOption = allowCustomValue && normalizedSearch.length >= 2 && !hasExactMatch
+  const optionCount = visibleOptions.length + (showCustomOption ? 1 : 0)
+  const visibleOptionsKey = visibleOptions
+    .map((option) => `${option.value}:${option.disabled ? 'disabled' : 'enabled'}`)
+    .join('|')
+  const activeOptionId = open && activeIndex >= 0 ? `${listboxId}-option-${activeIndex}` : undefined
+
+  const closeMenu = (restoreFocus = false) => {
+    setOpen(false)
+    setSearch('')
+    setActiveIndex(-1)
+    if (restoreFocus) window.requestAnimationFrame(() => triggerRef.current?.focus())
+  }
+
+  const isEnabledIndex = (index: number) => {
+    if (index < 0 || index >= optionCount) return false
+    if (index === visibleOptions.length) return showCustomOption
+    return !visibleOptions[index]?.disabled
+  }
+
+  const findEnabledIndex = (start: number, direction: 1 | -1) => {
+    if (optionCount === 0) return -1
+    for (let offset = 0; offset < optionCount; offset += 1) {
+      const index = (start + direction * offset + optionCount) % optionCount
+      if (isEnabledIndex(index)) return index
+    }
+    return -1
+  }
+
+  const moveActive = (direction: 1 | -1) => {
+    setActiveIndex((current) => {
+      const start = current < 0 ? (direction === 1 ? 0 : optionCount - 1) : current + direction
+      return findEnabledIndex(start, direction)
+    })
+  }
+
+  useLayoutEffect(() => {
+    if (!open) return
+    const updatePosition = () => {
+      const rect = triggerRef.current?.getBoundingClientRect()
+      if (!rect) return
+      const availableWidth = Math.max(0, window.innerWidth - 16)
+      const width = Math.min(320, Math.max(220, rect.width), availableWidth)
+      const searchHeight = searchable ? 42 : 0
+      const estimatedHeight = Math.min(280, Math.max(40, optionCount * 32 + searchHeight + 8))
+      const spaceBelow = window.innerHeight - rect.bottom - 8
+      const spaceAbove = rect.top - 8
+      const opensBelow = spaceBelow >= Math.min(estimatedHeight, 180) || spaceBelow >= spaceAbove
+      const availableHeight = Math.max(40, opensBelow ? spaceBelow : spaceAbove)
+      const maxHeight = Math.min(280, availableHeight)
+      const renderedHeight = Math.min(estimatedHeight, maxHeight)
+      const top = opensBelow ? rect.bottom + 5 : rect.top - renderedHeight - 5
+      const left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8))
+      setPosition({ left, top: Math.max(8, top), width, maxHeight })
+    }
+    updatePosition()
+    window.addEventListener('resize', updatePosition)
+    window.addEventListener('scroll', updatePosition, true)
+    return () => {
+      window.removeEventListener('resize', updatePosition)
+      window.removeEventListener('scroll', updatePosition, true)
+    }
+  }, [open, optionCount, searchable])
+
+  useEffect(() => {
+    if (!open) return
+    const selectedIndex = visibleOptions.findIndex(
+      (option) => option.value === value && !option.disabled,
+    )
+    if (selectedIndex >= 0) {
+      setActiveIndex(selectedIndex)
+      return
+    }
+    setActiveIndex(findEnabledIndex(0, 1))
+  }, [open, normalizedSearch, showCustomOption, value, visibleOptionsKey])
+
+  useEffect(() => {
+    if (!disabled || !open) return
+    setOpen(false)
+    setSearch('')
+    setActiveIndex(-1)
+  }, [disabled, open])
+
+  useEffect(() => {
+    if (!open || activeIndex < 0) return
+    const activeOption = document.getElementById(`${listboxId}-option-${activeIndex}`)
+    activeOption?.scrollIntoView?.({ block: 'nearest' })
+  }, [activeIndex, listboxId, open])
+
+  useEffect(() => {
+    if (!open) return
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      const target = event.target as Node
+      if (!triggerRef.current?.contains(target) && !menuRef.current?.contains(target)) {
+        closeMenu()
+      }
+    }
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        event.stopPropagation()
+        closeMenu(true)
+      }
+    }
+    document.addEventListener('pointerdown', closeOnOutsidePointer)
+    document.addEventListener('keydown', closeOnEscape)
+    const focusFrame = searchable
+      ? window.requestAnimationFrame(() => searchRef.current?.focus())
+      : null
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutsidePointer)
+      document.removeEventListener('keydown', closeOnEscape)
+      if (focusFrame !== null) window.cancelAnimationFrame(focusFrame)
+    }
+  }, [open, searchable])
+
+  const choose = (nextValue: string) => {
+    onChange(nextValue)
+    closeMenu(true)
+  }
+
+  const chooseActive = () => {
+    if (!isEnabledIndex(activeIndex)) return false
+    if (activeIndex === visibleOptions.length) choose(search.trim())
+    else choose(visibleOptions[activeIndex].value)
+    return true
+  }
+
+  const handleTriggerKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault()
+      if (!open) setOpen(true)
+      else if (!searchable) chooseActive()
+    } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      if (!open) setOpen(true)
+      else moveActive(event.key === 'ArrowDown' ? 1 : -1)
+    } else if (open && (event.key === 'Home' || event.key === 'End')) {
+      event.preventDefault()
+      setActiveIndex(
+        findEnabledIndex(event.key === 'Home' ? 0 : optionCount - 1, event.key === 'Home' ? 1 : -1),
+      )
+    } else if (open && event.key === 'Tab') {
+      closeMenu()
+    }
+  }
+
+  const handleSearchKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      moveActive(event.key === 'ArrowDown' ? 1 : -1)
+    } else if (event.key === 'Home' || event.key === 'End') {
+      event.preventDefault()
+      setActiveIndex(
+        findEnabledIndex(event.key === 'Home' ? 0 : optionCount - 1, event.key === 'Home' ? 1 : -1),
+      )
+    } else if (event.key === 'Enter') {
+      event.preventDefault()
+      chooseActive()
+    } else if (event.key === 'Tab') {
+      closeMenu()
+    }
+  }
+
+  return (
+    <div className={`${styles.root} ${rootClassName ?? ''}`}>
+      <button
+        ref={triggerRef}
+        id={id}
+        type="button"
+        className={`${styles.trigger} ${className ?? ''}`}
+        aria-label={ariaLabel}
+        aria-haspopup="listbox"
+        aria-controls={open ? listboxId : undefined}
+        aria-activedescendant={!searchable ? activeOptionId : undefined}
+        aria-expanded={open}
+        title={title}
+        disabled={disabled}
+        data-placeholder={showsPlaceholder ? '' : undefined}
+        onClick={(event) => {
+          event.stopPropagation()
+          if (open) closeMenu()
+          else setOpen(true)
+        }}
+        onKeyDown={handleTriggerKeyDown}
+        onPointerDown={(event) => event.stopPropagation()}
+      >
+        <span className={styles.triggerLabel}>{selectedLabel}</span>
+        <ChevronDown className={styles.chevron} size={14} aria-hidden="true" />
+      </button>
+      {open && !disabled
+        ? createPortal(
+            // The menu is portaled out of any modal dialog, whose focus trap would pull focus
+            // back from the search box. An untrapped scope pauses that trap while the menu is open.
+            <FocusScope
+              asChild
+              trapped={false}
+              onMountAutoFocus={(event) => event.preventDefault()}
+              onUnmountAutoFocus={(event) => event.preventDefault()}
+            >
+              <div
+                ref={menuRef}
+                className={styles.menu}
+                data-coding-agent-dropdown-menu=""
+                style={{
+                  left: position.left,
+                  top: position.top,
+                  width: position.width,
+                  maxHeight: position.maxHeight,
+                }}
+                onPointerDown={(event) => event.stopPropagation()}
+                onMouseDown={(event) => event.stopPropagation()}
+                onWheel={(event) => event.stopPropagation()}
+              >
+                {searchable ? (
+                  <div className={styles.searchBox}>
+                    <Search size={13} aria-hidden="true" />
+                    <input
+                      ref={searchRef}
+                      className={styles.searchInput}
+                      value={search}
+                      onChange={(event) => setSearch(event.target.value)}
+                      onKeyDown={handleSearchKeyDown}
+                      placeholder={searchPlaceholder}
+                      aria-label={searchPlaceholder ?? ariaLabel}
+                      aria-controls={listboxId}
+                      aria-activedescendant={activeOptionId}
+                    />
+                  </div>
+                ) : null}
+                <div
+                  className={styles.options}
+                  id={listboxId}
+                  role="listbox"
+                  aria-label={ariaLabel}
+                >
+                  {visibleOptions.map((option, index) => (
+                    <button
+                      key={option.value}
+                      id={`${listboxId}-option-${index}`}
+                      type="button"
+                      role="option"
+                      aria-selected={option.value === value}
+                      disabled={option.disabled}
+                      tabIndex={-1}
+                      className={`${styles.option} ${option.value === value ? styles.optionSelected : ''} ${index === activeIndex ? styles.optionActive : ''}`}
+                      title={typeof option.label === 'string' ? option.label : undefined}
+                      onMouseEnter={() => {
+                        if (!option.disabled) setActiveIndex(index)
+                      }}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        if (!option.disabled) choose(option.value)
+                      }}
+                    >
+                      <span className={styles.optionLabel}>{option.label}</span>
+                      {option.value === value ? (
+                        <Check className={styles.check} size={13} aria-hidden="true" />
+                      ) : null}
+                    </button>
+                  ))}
+                  {showCustomOption ? (
+                    <button
+                      id={`${listboxId}-option-${visibleOptions.length}`}
+                      type="button"
+                      role="option"
+                      aria-selected={value === search.trim()}
+                      tabIndex={-1}
+                      className={`${styles.option} ${styles.customOption} ${activeIndex === visibleOptions.length ? styles.optionActive : ''}`}
+                      onMouseEnter={() => setActiveIndex(visibleOptions.length)}
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        choose(search.trim())
+                      }}
+                    >
+                      <span>{customOptionLabel?.(search.trim()) ?? search.trim()}</span>
+                    </button>
+                  ) : null}
+                  {visibleOptions.length === 0 && !showCustomOption ? (
+                    <div className={styles.empty} role="status">
+                      {typeof emptyLabel === 'function' ? emptyLabel(search.trim()) : emptyLabel}
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            </FocusScope>,
+            document.body,
+          )
+        : null}
+    </div>
+  )
+}

@@ -1,0 +1,374 @@
+import type { ComponentType, ReactNode } from 'react'
+
+import type { AgentProviderContribution } from '../agentProviders'
+import type { Locale } from '../i18n'
+import type { PluginManifest } from '../tauri'
+import type { Terminal } from '../types'
+import type { PluginStorage } from './storage'
+
+export type Disposable = { dispose: () => void }
+
+export type ThemeContribution = {
+  id: string
+  /** Fallback label. A `theme.<id>.label` message, when registered, wins. */
+  label: string
+  description?: string
+  /** Background, accent and foreground, in that order — the picker swatch. */
+  swatch: [string, string, string]
+  /** Overrides the luminance guess made from the swatch background. */
+  light?: boolean
+  /** CSS custom properties. Names must carry the leading `--`. */
+  tokens: Record<string, string>
+  /** xterm palette merged over the built-in fallback for this theme's mode. */
+  terminal?: Record<string, string>
+}
+
+export type PaneProps = {
+  projectId: string
+  terminal: Terminal
+  paneDragEnabled?: boolean
+}
+
+export type PaneContribution = {
+  /** Matches `Terminal.kind`. */
+  id: string
+  component: ComponentType<PaneProps>
+  /** Shown while a lazily loaded component resolves. */
+  fallback?: ReactNode
+}
+
+/**
+ * A modal a plugin owns. The shell renders it when `openModal` matches the id,
+ * so a plugin does not have to reach into the UI store to mount itself.
+ */
+export type ModalContribution = {
+  id: string
+  component: ComponentType
+}
+
+/** Mounted once over the whole window while the plugin is active, for bars and indicators. */
+export type OverlayContribution = {
+  id: string
+  component: ComponentType
+}
+
+/** A section the Integrations page renders, with an entry in the settings search. */
+export type SettingsContribution = {
+  id: string
+  /** Called on render, so a plugin's own `t` follows the current language. */
+  title: () => string
+  description?: () => string
+  /** Extra words the settings search matches on. */
+  keywords?: string
+  component: ComponentType
+}
+
+export type WorkspaceProject = {
+  id: string
+  name: string
+  path: string
+}
+
+export type WorkspaceTerminal = {
+  id: string
+  projectId: string
+  projectName: string
+  name: string
+  agent: string
+  agentLabel: string
+  cwd: string
+  /** Its process is alive, so it can be typed into. */
+  running: boolean
+  /** Its agent is working on something right now. */
+  busy: boolean
+}
+
+export type WorkspaceAgent = {
+  id: string
+  label: string
+}
+
+export type WorkspaceSnapshot = {
+  projects: WorkspaceProject[]
+  terminals: WorkspaceTerminal[]
+  /** Enabled agent CLIs, shells excluded. */
+  agents: WorkspaceAgent[]
+  focusedProjectId: string | null
+  focusedTerminalId: string | null
+}
+
+export type OpenAgentTerminalOptions = {
+  agent: string
+  name?: string
+  /** Typed into the agent once it starts. */
+  prompt?: string
+}
+
+/**
+ * Reads and moves the workspace. Reading needs `workspace.read`, opening, focusing and closing
+ * terminals needs `workspace.control`, and typing into one needs `terminal.write`.
+ */
+export type PluginWorkspace = {
+  snapshot: () => WorkspaceSnapshot
+  focusTerminal: (terminalId: string) => void
+  closeTerminal: (terminalId: string) => void
+  /** Resolves with the new terminal's id. */
+  openAgentTerminal: (projectId: string, options: OpenAgentTerminalOptions) => Promise<string>
+  writeToTerminal: (terminalId: string, text: string) => Promise<void>
+}
+
+export type TerminalSessionStatus = 'working' | 'waiting' | 'stopped' | 'disabled' | 'offline'
+
+export type TerminalSession = {
+  // opaque, and replaced whenever the tab's process is
+  id: string
+  terminalId: string
+  projectId: string
+  name: string
+  agent: string
+  agentLabel: string
+  shell: boolean
+  status: TerminalSessionStatus
+}
+
+export type TerminalExit = {
+  code: number | null
+  reason: string
+}
+
+export type PluginTerminals = {
+  sessions: () => TerminalSession[]
+  onChange: (handler: () => void) => Disposable
+  onOutput: (sessionId: string, handler: (chunk: string) => void) => Disposable
+  onExit: (sessionId: string, handler: (exit: TerminalExit) => void) => Disposable
+  size: (sessionId: string) => { cols: number; rows: number } | null
+  write: (sessionId: string, text: string) => Promise<void>
+}
+
+export type VoiceCloudProvider = 'openai' | 'elevenlabs' | 'gemini' | 'openrouter'
+export type VoiceSttProvider = 'local' | 'apple' | VoiceCloudProvider
+export type VoiceTtsProvider = 'system' | 'local' | 'server' | VoiceCloudProvider
+export type VoiceInputDevice = { deviceId: string; label: string; isDefault: boolean }
+export type VoiceNativeLocale = { id: string; name: string; installed: boolean }
+export type VoiceModelState = {
+  id: string
+  status: string
+  progress: number | null
+  error: string | null
+  downloadedBytes: number | null
+  totalBytes: number | null
+}
+export type VoiceCapturedAudio = { samples: number[]; sampleRate: number; peak: number }
+export type VoiceVadStatus = {
+  level: number
+  voice: boolean
+  heardMs: number
+  silenceMs: number
+  segments: number
+}
+export type VoiceTranscriptionOptions = { modelId: string; locale?: string }
+export type VoicePrepareOptions = VoiceTranscriptionOptions & { provider?: VoiceSttProvider }
+export type VoiceTranscribeOptions = VoicePrepareOptions & {
+  fallbackLocale?: string
+  usage?: string
+}
+export type VoiceVoicesOptions = { provider?: VoiceTtsProvider; model?: string; server?: string }
+export type VoicePrefetchOptions = {
+  provider?: VoiceTtsProvider
+  model?: string
+  voice?: string
+  rate?: number
+}
+export type VoiceSpeakOptions = VoicePrefetchOptions & { server?: string }
+export type VoiceTtsVoice = { id: string; name: string; language: string }
+export type VoiceUtteranceEvent = { id: number }
+export type VoiceHudRect = { x: number; y: number; width: number; height: number }
+export type VoiceHudPosition = { monitor: string; x: number; y: number; bounds?: VoiceHudRect }
+export type VoiceHudPlacement =
+  | {
+      kind: 'preset'
+      preset:
+        'bottom-center' | 'bottom-left' | 'bottom-right' | 'top-center' | 'top-left' | 'top-right'
+    }
+  | { kind: 'custom'; custom: VoiceHudPosition }
+export type VoiceShortcutEvent = { state: 'pressed' | 'released'; jev: boolean }
+export type VoiceProviderCatalog = {
+  provider: VoiceCloudProvider
+  keyUrl: string
+  models: { id: string; label: string; capability: 'stt' | 'tts' }[]
+  voices: { id: string; label: string }[]
+  hasKey: boolean
+}
+
+export type PluginVoice = {
+  inputDevices: () => Promise<VoiceInputDevice[]>
+  nativeLocales: () => Promise<VoiceNativeLocale[]>
+  modelStates: (locale?: string) => Promise<VoiceModelState[]>
+  prepare: (options: VoicePrepareOptions) => Promise<boolean>
+  startCapture: (deviceId?: string) => Promise<void>
+  captureLevel: () => Promise<number>
+  vadStatus: () => Promise<VoiceVadStatus | null>
+  prepareVad: () => Promise<boolean>
+  stopCapture: () => Promise<VoiceCapturedAudio>
+  stopAndTranscribe: (options: VoiceTranscribeOptions) => Promise<string>
+  transcribePartial: (options: VoiceTranscriptionOptions) => Promise<string>
+  speak: (text: string, options?: VoiceSpeakOptions) => Promise<number>
+  prefetch: (text: string, options?: VoicePrefetchOptions) => Promise<void>
+  stop: () => Promise<void>
+  pause: () => Promise<void>
+  resume: () => Promise<void>
+  setMuted: (muted: boolean) => Promise<void>
+  voices: (options?: VoiceVoicesOptions) => Promise<VoiceTtsVoice[]>
+  onStart: (handler: (event: VoiceUtteranceEvent) => void) => Disposable
+  onEnd: (handler: (event: VoiceUtteranceEvent) => void) => Disposable
+  hud: {
+    show: (placement: VoiceHudPlacement) => Promise<void>
+    hide: () => Promise<void>
+    publish: (state: string) => Promise<void>
+    onAction: (handler: (action: string) => void) => Disposable
+    onMoved: (handler: (position: VoiceHudPosition) => void) => Disposable
+    setShortcut: (accelerator: string | null) => Promise<void>
+    onShortcut: (handler: (event: VoiceShortcutEvent) => void) => Disposable
+  }
+  providers: () => Promise<VoiceProviderCatalog[]>
+  openSettings: () => void
+}
+
+export type PluginAgents = {
+  label: (agent: string) => string
+  // a CSS color that follows the active theme
+  accent: (agent: string) => string
+}
+
+export type PluginDropdownProps = {
+  value: string
+  options: { value: string; label: string }[]
+  onChange: (value: string) => void
+  ariaLabel: string
+  disabled?: boolean
+}
+
+export type PluginComponents = {
+  AgentIcon: ComponentType<{ agent: string; size?: number }>
+  Dropdown: ComponentType<PluginDropdownProps>
+}
+
+export type PluginToast = {
+  title: string
+  body?: string
+}
+
+export type SidebarSide = 'left' | 'right'
+
+/**
+ * What a sidebar tab is given about the surface it renders next to. Every field
+ * is null when the workspace has no usable terminal yet; the tab renders its own
+ * empty state in that case.
+ */
+export type SidebarTabProps = {
+  projectId: string | null
+  cwd: string | null
+  ptyId: string | null
+  terminalName: string | null
+}
+
+export type SidebarTabContribution = {
+  id: string
+  pluginId: string
+  /** Container the manifest declares. A user placement override can move it. */
+  side: SidebarSide
+  /** Any icon component taking a `size` prop — lucide icons fit directly. */
+  icon: ComponentType<{ size?: number | string }>
+  /** Fallback label. `labelKey` wins when its message resolves. */
+  label: string
+  labelKey?: string
+  /** Header shown above the panel. Defaults to the tab label. */
+  panelLabelKey?: string
+  order?: number
+  /** Null until the owning plugin activates and supplies the implementation. */
+  component: ComponentType<SidebarTabProps> | null
+}
+
+export type CommandContribution = {
+  id: string
+  pluginId: string
+  /** Fallback label. `labelKey` wins when its message resolves. */
+  label: string
+  labelKey?: string
+  icon?: ComponentType<{ size?: number | string }>
+  /** Extra words the command palette matches on, beyond the label. */
+  keywords?: string
+  /** Activates the owning plugin, then runs its handler. */
+  run: () => Promise<void>
+}
+
+/**
+ * Contributions a plugin registers imperatively. Views and commands are not
+ * here: those are announced in the manifest so the shell can draw them before
+ * the plugin's code loads, and only their implementation is registered.
+ */
+export type PluginContributions = {
+  theme: (definition: ThemeContribution) => Disposable
+  pane: (definition: PaneContribution) => Disposable
+  modal: (definition: ModalContribution) => Disposable
+  agentProvider: (definition: AgentProviderContribution) => Disposable
+  overlay: (definition: OverlayContribution) => Disposable
+  settings: (definition: SettingsContribution) => Disposable
+}
+
+export type PluginContext = {
+  readonly id: string
+  readonly manifest: PluginManifest
+  /** Disposed on deactivate. Push anything the plugin must undo. */
+  readonly subscriptions: Disposable[]
+  readonly contributes: PluginContributions
+  /** Supplies the component for a view this plugin's manifest declares. */
+  registerView: (viewId: string, component: ComponentType<SidebarTabProps>) => Disposable
+  /** Supplies the handler for a command this plugin's manifest declares. */
+  registerCommand: (commandId: string, run: () => void | Promise<void>) => Disposable
+  /**
+   * Navigation, limited to what this plugin itself contributed. A plugin may open its own
+   * view and its own modal; it may not move anything else in the app.
+   */
+  readonly ui: {
+    /** Reveals a view this plugin declared, opening whichever sidebar currently holds it. */
+    revealView: (viewId: string) => void
+    /** Opens a modal this plugin contributed. */
+    openModal: (modalId: string) => void
+    /** Shows a notification and records it in the notification history. */
+    toast: (toast: PluginToast) => void
+  }
+  readonly workspace: PluginWorkspace
+  readonly voice: PluginVoice
+  readonly terminals: PluginTerminals
+  readonly agents: PluginAgents
+  readonly components: PluginComponents
+  locale: () => Locale
+  /** Registers messages under `plugin.<id>.` — the prefix is added for you. */
+  registerMessages: (locale: Locale, messages: Record<string, string>) => Disposable
+  /** Translates one of this plugin's own keys, without the prefix. */
+  t: (key: string, params?: Record<string, string | number>) => string
+  /** Hook form of `t` that re-renders the component when the language changes. */
+  useT: () => (key: string, params?: Record<string, string | number>) => string
+  /** Rejects any command the manifest does not declare a capability for. */
+  invoke: <T>(command: string, args?: Record<string, unknown>) => Promise<T>
+  /** Subscribes to an app event. Needs `listen:<event>`, which accepts a trailing `*`. */
+  listen: <T>(event: string, handler: (payload: T) => void) => Disposable
+  /** The plugin's own persisted record, kept outside its served directory. */
+  readonly storage: PluginStorage
+}
+
+export type PluginModule = {
+  activate?: (context: PluginContext) => void | Promise<void>
+  deactivate?: (context: PluginContext) => void | Promise<void>
+}
+
+export type PluginSource = 'bundled' | 'local'
+
+export type PluginRuntimeEntry = {
+  manifest: PluginManifest
+  source: PluginSource
+  enabled: boolean
+  active: boolean
+  error: string | null
+}

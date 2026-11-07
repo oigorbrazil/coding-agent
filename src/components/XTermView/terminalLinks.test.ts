@@ -1,0 +1,214 @@
+import { describe, expect, it } from 'vitest'
+
+import {
+  detectTerminalLinks,
+  getLogicalTerminalLine,
+  relativeTerminalPath,
+  resolveTerminalFilePath,
+  terminalLinkRange,
+} from './terminalLinks'
+
+describe('terminal links', () => {
+  it('ends URLs at whitespace while preserving spaces inside local paths', () => {
+    expect(detectTerminalLinks('https://github.com/login/device in your browser...')).toEqual([
+      expect.objectContaining({
+        text: 'https://github.com/login/device',
+        displayLength: 'https://github.com/login/device'.length,
+      }),
+    ])
+    expect(detectTerminalLinks('(https://github.com/login/device in your browser)')[0].text).toBe(
+      'https://github.com/login/device',
+    )
+    expect(detectTerminalLinks('D:\\public launch\\src\\file.ts')).toEqual([
+      expect.objectContaining({ text: 'D:\\public launch\\src\\file.ts', kind: 'path' }),
+    ])
+    expect(
+      detectTerminalLinks('"D:\\tmp\\shot-lab-strips\\ um PNG por shot, nome = slug."')[0],
+    ).toEqual(
+      expect.objectContaining({
+        text: 'D:\\tmp\\shot-lab-strips\\',
+        target: 'D:\\tmp\\shot-lab-strips\\',
+        kind: 'path',
+      }),
+    )
+  })
+
+  it('detects mixed-case protocols and bare deployment domains', () => {
+    const links = detectTerminalLinks(
+      'Deploy em verzel-elite-dev-painel.vercel.app (Https://verzel-elite-dev-painel.vercel.app).',
+    )
+
+    expect(links).toEqual([
+      expect.objectContaining({
+        text: 'verzel-elite-dev-painel.vercel.app',
+        target: 'https://verzel-elite-dev-painel.vercel.app',
+        kind: 'url',
+      }),
+      expect.objectContaining({
+        text: 'Https://verzel-elite-dev-painel.vercel.app',
+        target: 'https://verzel-elite-dev-painel.vercel.app',
+        kind: 'url',
+      }),
+    ])
+    expect(detectTerminalLinks('localhost:5173/dashboard')[0]).toEqual(
+      expect.objectContaining({ target: 'http://localhost:5173/dashboard', kind: 'url' }),
+    )
+  })
+
+  it('reconstructs viewport-wrapped lines and creates a multiline range', () => {
+    const values = [
+      { value: 'go https:/', isWrapped: false },
+      { value: '/example.c', isWrapped: true },
+      { value: 'om/docs', isWrapped: true },
+    ]
+    const buffer = {
+      length: values.length,
+      getLine: (index: number) => {
+        const line = values[index]
+        return line ? { isWrapped: line.isWrapped, translateToString: () => line.value } : undefined
+      },
+    }
+
+    const logicalLine = getLogicalTerminalLine(buffer, 2)
+    expect(logicalLine).toEqual({ text: 'go https://example.com/docs', startLine: 1 })
+    const [link] = detectTerminalLinks(logicalLine!.text)
+    expect(terminalLinkRange(logicalLine!.startLine, 10, link)).toEqual({
+      start: { x: 4, y: 1 },
+      end: { x: 7, y: 3 },
+    })
+  })
+
+  it('keeps escaped spaces in the visual range and unescapes the opened path', () => {
+    const [link] = detectTerminalLinks('/tmp/my\\ file/readme.md')
+    expect(link.text).toBe('/tmp/my file/readme.md')
+    expect(link.displayLength).toBe('/tmp/my\\ file/readme.md'.length)
+    expect(link.fileKind).toBe('markdown')
+  })
+
+  it('classifies path links by extension', () => {
+    expect(detectTerminalLinks('/tmp/shot.png')[0].fileKind).toBe('image')
+    expect(detectTerminalLinks('/tmp/main.ts:42:10')[0].fileKind).toBe('text')
+    expect(detectTerminalLinks('/tmp/notes.md')[0].fileKind).toBe('markdown')
+    expect(detectTerminalLinks('/tmp/trailer.mp4')[0].fileKind).toBe('video')
+    expect(
+      detectTerminalLinks(
+        'Jogado em D:\\kauam\\Vaults\\Nostromo\\40-Conteudo\\youtube\\projecao-canal.md com as duas projeções',
+      )[0].text,
+    ).toBe('D:\\kauam\\Vaults\\Nostromo\\40-Conteudo\\youtube\\projecao-canal.md')
+    expect(
+      detectTerminalLinks('D:\\kauam\\Videos\\motion-kit-hype-video.mp4 e escuta')[0].text,
+    ).toBe('D:\\kauam\\Videos\\motion-kit-hype-video.mp4')
+    expect(detectTerminalLinks('https://example.com/x')[0].fileKind).toBeUndefined()
+  })
+
+  it('detects relative files printed by coding agents', () => {
+    expect(detectTerminalLinks('Updated README.md')[0]).toEqual(
+      expect.objectContaining({ text: 'README.md', kind: 'path', fileKind: 'markdown' }),
+    )
+    expect(detectTerminalLinks('See src/components/App.tsx:42')[0]).toEqual(
+      expect.objectContaining({
+        text: 'src/components/App.tsx:42',
+        kind: 'path',
+        fileKind: 'text',
+      }),
+    )
+    expect(detectTerminalLinks('user@example.com')).toEqual([])
+  })
+
+  it('resolves relative agent links from the terminal working directory', () => {
+    expect(resolveTerminalFilePath('README.md', 'D:\\repo')).toBe('D:\\repo\\README.md')
+    expect(resolveTerminalFilePath('./docs/README.md:12', '/workspace/repo')).toBe(
+      '/workspace/repo/docs/README.md',
+    )
+    expect(resolveTerminalFilePath('D:\\repo\\README.md', 'D:\\other')).toBe('D:\\repo\\README.md')
+  })
+
+  // `~\` is how Windows shells and agents print home paths (#237).
+  it('resolves a home prefix from the home folder instead of the terminal folder', () => {
+    const [link] = detectTerminalLinks(
+      'em ~\\Desktop\\para-gpt\\validacao_externa_29-09.zip (sha256 e5de322d)',
+    )
+    expect(link.text).toBe('~\\Desktop\\para-gpt\\validacao_externa_29-09.zip')
+    expect(resolveTerminalFilePath(link.target, 'C:\\repo', 'C:\\Users\\me')).toBe(
+      'C:\\Users\\me\\Desktop\\para-gpt\\validacao_externa_29-09.zip',
+    )
+    expect(resolveTerminalFilePath('~/notes.md:3', '/work/repo', '/home/me/')).toBe(
+      '/home/me/notes.md',
+    )
+    expect(resolveTerminalFilePath('~', 'C:\\repo', 'C:\\Users\\me')).toBe('C:\\Users\\me')
+    // Until the home folder is known, the path is kept as printed rather than joined to the cwd.
+    expect(resolveTerminalFilePath('~\\notes.md', 'C:\\repo')).toBe('~\\notes.md')
+    expect(resolveTerminalFilePath('~other\\notes.md', 'C:\\repo', 'C:\\Users\\me')).toBe(
+      'C:\\repo\\~other\\notes.md',
+    )
+  })
+
+  it('ends a Windows home path where a `~/` path would end', () => {
+    expect(detectTerminalLinks('~\\projetos\\coding-agent roda em dev')[0].text).toBe(
+      '~\\projetos\\coding-agent',
+    )
+    expect(
+      detectTerminalLinks('~\\projects\\coding-agent ~\\Desktop\\notes.md').map(
+        (link) => link.text,
+      ),
+    ).toEqual(['~\\projects\\coding-agent', '~\\Desktop\\notes.md'])
+    expect(detectTerminalLinks('~\\Desktop\\ see readme.md').map((link) => link.text)).toEqual([
+      '~\\Desktop\\',
+      'readme.md',
+    ])
+  })
+
+  it('keeps the printed relative path so it can be looked up in other worktrees', () => {
+    expect(relativeTerminalPath('./docs/report.md:12')).toBe('docs/report.md')
+    expect(relativeTerminalPath('repo-feature\\docs\\report.md')).toBe(
+      'repo-feature\\docs\\report.md',
+    )
+    expect(relativeTerminalPath('D:\\repo\\README.md')).toBeNull()
+    expect(relativeTerminalPath('/workspace/README.md')).toBeNull()
+    expect(relativeTerminalPath('~/notes.md')).toBeNull()
+  })
+
+  it('stops an extensionless path at the first space instead of eating the sentence', () => {
+    const [link] = detectTerminalLinks(
+      '/pt-br/vitrine-dupla/trajetoria — 5 variações de trajetória',
+    )
+    expect(link.text).toBe('/pt-br/vitrine-dupla/trajetoria')
+
+    expect(detectTerminalLinks('/api/users retorna 401 quando o token expira')[0].text).toBe(
+      '/api/users',
+    )
+    expect(detectTerminalLinks('~/projetos/coding-agent roda em dev e em prod')[0].text).toBe(
+      '~/projetos/coding-agent',
+    )
+  })
+
+  it('still crosses a space when a file extension is waiting on the other side', () => {
+    expect(detectTerminalLinks('/tmp/my folder/readme.md')[0].text).toBe('/tmp/my folder/readme.md')
+    expect(detectTerminalLinks('D:\\public launch\\src\\file.ts')[0].text).toBe(
+      'D:\\public launch\\src\\file.ts',
+    )
+  })
+
+  it('does not turn prose slashes into links', () => {
+    expect(detectTerminalLinks('/ Zambia / India')).toEqual([])
+    expect(detectTerminalLinks('IP residencial/mobile + UA')).toEqual([])
+    expect(detectTerminalLinks('foo/bar')).toEqual([])
+    expect(
+      detectTerminalLinks('src/file.ts package.json user@example.com').map((link) => link.text),
+    ).toEqual(['src/file.ts', 'package.json'])
+  })
+
+  it('keeps two bracketed paths apart instead of linking the whole parenthetical', () => {
+    expect(
+      detectTerminalLinks('(/pt-br/vitrine-dupla/projetos e /en/double-showcase/projects)').map(
+        (link) => link.text,
+      ),
+    ).toEqual(['/pt-br/vitrine-dupla/projetos', '/en/double-showcase/projects'])
+  })
+
+  it('still stops a bracketed path at the closing bracket', () => {
+    expect(detectTerminalLinks('see (/tmp/my folder/readme.md) now')[0].text).toBe(
+      '/tmp/my folder/readme.md',
+    )
+  })
+})

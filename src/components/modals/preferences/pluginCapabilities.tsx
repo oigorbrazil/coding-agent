@@ -1,0 +1,45 @@
+import { type MessageKey, useT } from '../../../lib/i18n'
+import styles from './PluginsPage.module.css'
+
+export const CAPABILITY_KEYS: Record<string, MessageKey> = {
+  'ui.theme': 'prefs.pluginsCapabilityTheme',
+  'ui.pane': 'prefs.pluginsCapabilityPane',
+  'ui.sidebarTab': 'prefs.pluginsCapabilitySidebarTab',
+  'ui.command': 'prefs.pluginsCapabilityCommand',
+  'ui.modal': 'prefs.pluginsCapabilityModal',
+  'agent.provider': 'prefs.pluginsCapabilityAgentProvider',
+  'ui.overlay': 'prefs.pluginsCapabilityOverlay',
+  'ui.settings': 'prefs.pluginsCapabilitySettings',
+  'workspace.read': 'prefs.pluginsCapabilityWorkspaceRead',
+  'workspace.control': 'prefs.pluginsCapabilityWorkspaceControl',
+  'terminal.read': 'prefs.pluginsCapabilityTerminalRead',
+  'terminal.write': 'prefs.pluginsCapabilityTerminalWrite',
+  'voice.listen': 'prefs.pluginsCapabilityVoiceListen',
+  'voice.speak': 'prefs.pluginsCapabilityVoiceSpeak',
+  'voice.hud': 'prefs.pluginsCapabilityVoiceHud',
+  'invoke:git_*': 'prefs.pluginsCapabilityGit',
+  'invoke:worktree_*': 'prefs.pluginsCapabilityWorktree',
+  'invoke:speech_*': 'prefs.pluginsCapabilitySpeech',
+  'invoke:agent_voice_*': 'prefs.pluginsCapabilityAgentVoice',
+  'invoke:jev_decide': 'prefs.pluginsCapabilityJevDecide',
+  'listen:speech*': 'prefs.pluginsCapabilitySpeechEvents',
+}
+
+export function CapabilityList({ capabilities }: { capabilities: readonly string[] }) {
+  const t = useT()
+  if (capabilities.length === 0) {
+    return <p className={styles.emptyNote}>{t('prefs.pluginsCapabilitiesNone')}</p>
+  }
+  return (
+    <ul className={styles.capabilityList}>
+      {capabilities.map((capability) => {
+        const key = CAPABILITY_KEYS[capability]
+        return (
+          <li key={capability}>
+            {key ? t(key) : <code className={styles.capabilityRaw}>{capability}</code>}
+          </li>
+        )
+      })}
+    </ul>
+  )
+}

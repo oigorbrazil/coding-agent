@@ -1,0 +1,22 @@
+Coding Agent
+Copyright (C) 2026 Coding Agent contributors
+
+Coding Agent is a modified version of Alethe.
+
+Alethe
+Created by Kauã Miguel
+Copyright (C) 2026 Kauã Miguel and Alethe contributors
+https://github.com/Kc1t/alethe-agents
+
+Both are licensed under AGPL-3.0-or-later (see LICENSE). Redistributions and
+modified versions must preserve the copyright, license, warranty, and attribution
+notices required by that license.
+
+Changes from Alethe 1.7.0 (2026-11-07): new name, icons and application
+identifier; the bundled orchestration skill replaced by Coding Opus ("coding");
+update channel, plugin catalog and cloud sync pointed away from Alethe's official
+services. The full list is in docs/CHANGELOG.md under [Unreleased].
+
+Coding Agent is not an official Alethe release and is not endorsed by Kauã Miguel.
+The Alethe name, logo and branding are governed by TRADEMARK.md (kept from the
+original project) and are not used as this project's branding.

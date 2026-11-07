@@ -1,0 +1,697 @@
+import * as Dialog from '@radix-ui/react-dialog'
+import {
+  Activity,
+  Archive,
+  Blocks,
+  ChevronRight,
+  Info,
+  type LucideIcon,
+  Mic,
+  MonitorPlay,
+  Palette,
+  Plug,
+  Puzzle,
+  Route,
+  Search,
+  ShieldCheck,
+  TerminalSquare,
+  UserRound,
+  Workflow,
+  X,
+} from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+
+import { useT } from '../../lib/i18n'
+import { settingsContributions, useContributions } from '../../lib/plugins'
+import { getProfileImageUrl, getProfileInitial } from '../../lib/profile'
+import { setSectionCollapsed } from '../../lib/settingsSections'
+import { useProjectsStore } from '../../stores/projectsStore'
+import { useUiStore } from '../../stores/uiStore'
+import { ErrorBoundary } from '../ErrorBoundary'
+import { AboutPage } from './preferences/AboutPage'
+import { AccountPage } from './preferences/AccountPage'
+import { AppearancePage } from './preferences/AppearancePage'
+import { FeaturesPage } from './preferences/FeaturesPage'
+import { IntegrationsPage } from './preferences/IntegrationsPage'
+import { MultiagentPage } from './preferences/MultiagentPage'
+import { OrchestrationPage } from './preferences/OrchestrationPage'
+import { OrganizationPage } from './preferences/OrganizationPage'
+import { PlaybooksPage } from './preferences/playbooks/PlaybooksPage'
+import { PluginsPage } from './preferences/PluginsPage'
+import { Avatar } from './preferences/primitives'
+import { RemoteControlPage } from './preferences/RemoteControlPage'
+import { TerminalPage } from './preferences/TerminalPage'
+import { TutorialsPage } from './preferences/TutorialsPage'
+import { VoicePage } from './preferences/voice/VoicePage'
+import styles from './PreferencesModal.module.css'
+
+type CategoryId =
+  | 'account'
+  | 'appearance'
+  | 'features'
+  | 'plugins'
+  | 'voice'
+  | 'terminal'
+  | 'integrations'
+  | 'multiagent'
+  | 'orchestration'
+  | 'playbooks'
+  | 'organization'
+  | 'tutorials'
+  | 'about'
+  | 'remoteControl'
+
+type Category = {
+  id: CategoryId
+  label: string
+  description: string
+  Icon: LucideIcon
+}
+
+type SearchItem = {
+  category: CategoryId
+  target: string
+  label: string
+  description: string
+  keywords: string
+}
+
+export function PreferencesModal() {
+  const t = useT()
+  const open = useUiStore((state) => state.openModal === 'preferences')
+  const closeModal = useUiStore((state) => state.closeModal)
+  const openModal = useUiStore((state) => state.openModal_)
+  const modalContext = useUiStore((state) => state.modalContext)
+  const preferences = useProjectsStore((state) => state.preferences)
+  const [category, setCategory] = useState<CategoryId>('account')
+  const [query, setQuery] = useState('')
+  const [resultCursor, setResultCursor] = useState(0)
+  const [pendingTarget, setPendingTarget] = useState<string | null>(null)
+  const contributedSettings = useContributions(settingsContributions)
+  const contentRef = useRef<HTMLDivElement>(null)
+  const dialogRef = useRef<HTMLDivElement>(null)
+
+  const categories = useMemo<Category[]>(
+    () => [
+      {
+        id: 'account',
+        label: t('prefs.categoryAccount'),
+        description: t('prefs.categoryAccountDesc'),
+        Icon: UserRound,
+      },
+      {
+        id: 'organization',
+        label: t('prefs.categoryOrganization'),
+        description: t('prefs.categoryOrganizationDesc'),
+        Icon: Archive,
+      },
+      {
+        id: 'appearance',
+        label: t('prefs.categoryAppearance'),
+        description: t('prefs.categoryAppearanceDesc'),
+        Icon: Palette,
+      },
+      {
+        id: 'remoteControl',
+        label: t('prefs.categoryRemoteControl'),
+        description: t('prefs.categoryRemoteControlDesc'),
+        Icon: ShieldCheck,
+      },
+      {
+        id: 'features',
+        label: t('prefs.features'),
+        description: t('prefs.featuresDesc'),
+        Icon: Blocks,
+      },
+      {
+        id: 'plugins',
+        label: t('prefs.categoryPlugins'),
+        description: t('prefs.categoryPluginsDesc'),
+        Icon: Puzzle,
+      },
+      {
+        id: 'voice',
+        label: t('prefs.categoryVoice'),
+        description: t('prefs.categoryVoiceDesc'),
+        Icon: Mic,
+      },
+      {
+        id: 'terminal',
+        label: t('prefs.categoryTerminal'),
+        description: t('prefs.categoryTerminalDesc'),
+        Icon: TerminalSquare,
+      },
+      {
+        id: 'integrations',
+        label: t('prefs.categoryIntegrations'),
+        description: t('prefs.categoryIntegrationsDesc'),
+        Icon: Plug,
+      },
+      {
+        id: 'orchestration',
+        label: t('prefs.categoryOrchestration'),
+        description: t('prefs.categoryOrchestrationDesc'),
+        Icon: Workflow,
+      },
+      {
+        id: 'playbooks',
+        label: t('prefs.categoryPlaybooks'),
+        description: t('prefs.categoryPlaybooksDesc'),
+        Icon: Route,
+      },
+      {
+        id: 'multiagent',
+        label: t('prefs.categoryMultiagent'),
+        description: t('prefs.categoryMultiagentDesc'),
+        Icon: Activity,
+      },
+      {
+        id: 'tutorials',
+        label: t('prefs.categoryTutorials'),
+        description: t('prefs.categoryTutorialsDesc'),
+        Icon: MonitorPlay,
+      },
+      {
+        id: 'about',
+        label: t('prefs.categoryAbout'),
+        description: t('prefs.categoryAboutDesc'),
+        Icon: Info,
+      },
+    ],
+    [t],
+  )
+
+  const searchItems = useMemo<SearchItem[]>(
+    () => [
+      {
+        category: 'account',
+        target: 'profile',
+        label: t('prefs.profile'),
+        description: t('prefs.profileDesc'),
+        keywords: 'avatar photo name nome perfil account conta 头像 照片 名称 账户 账号',
+      },
+      {
+        category: 'account',
+        target: 'language',
+        label: t('prefs.language'),
+        description: t('prefs.languageDesc'),
+        keywords: 'language idioma português english 语言 中文 chinese zh',
+      },
+      {
+        category: 'account',
+        target: 'local-accounts',
+        label: t('prefs.localAccounts'),
+        description: t('prefs.localAccountsDesc'),
+        keywords: 'account profile conta perfil local switch trocar 账户 账号 个人资料 切换',
+      },
+      {
+        category: 'appearance',
+        target: 'ui-theme',
+        label: t('prefs.uiTheme'),
+        description: t('prefs.uiThemeDesc'),
+        keywords: 'theme tema colors cores light dark claro escuro 主题 颜色 浅色 深色',
+      },
+      {
+        category: 'remoteControl',
+        target: 'remote-status',
+        label: t('remote.settingsStatusTitle'),
+        description: t('remote.settingsStatusDesc'),
+        keywords: 'remote control lan security qr device mobile celular segurança pareamento',
+      },
+      {
+        category: 'organization',
+        target: 'archived-groups',
+        label: t('prefs.categoryOrganization'),
+        description: t('prefs.categoryOrganizationDesc'),
+        keywords: 'archive archived groups grupo arquivado restaurar restore',
+      },
+      {
+        category: 'appearance',
+        target: 'ui-zoom',
+        label: t('prefs.uiZoom'),
+        description: t('prefs.uiZoomDesc'),
+        keywords: 'zoom scale escala tamanho interface',
+      },
+      {
+        category: 'appearance',
+        target: 'window-opacity',
+        label: t('prefs.windowOpacity'),
+        description: t('prefs.windowOpacityDesc'),
+        keywords: 'opacity opacidade transparency transparência desktop window janela',
+      },
+      {
+        category: 'appearance',
+        target: 'topbar-style',
+        label: t('prefs.topbarStyle'),
+        description: t('prefs.topbarStyleDesc'),
+        keywords: 'topbar barra superior layout areas tabs sidebar',
+      },
+      {
+        category: 'appearance',
+        target: 'view-placement',
+        label: t('prefs.viewPlacement'),
+        description: t('prefs.viewPlacementDesc'),
+        keywords: 'git source control plugin view sidebar esquerda direita left right',
+      },
+      {
+        category: 'features',
+        target: 'optional-features',
+        label: t('prefs.features'),
+        description: t('prefs.featuresDesc'),
+        keywords:
+          'features recursos modules módulos todo task tarefa git source control sidebar 功能 模块 待办',
+      },
+      {
+        category: 'plugins',
+        target: 'plugins-installed',
+        label: t('prefs.pluginsInstalledTitle'),
+        description: t('prefs.pluginsInstalledDesc'),
+        keywords:
+          'plugin plugins extension extensao extensão addon bundled integrado local enable disable ativar desativar capability capabilities permissao permissão theme tema pane painel sidebar command comando',
+      },
+      {
+        category: 'plugins',
+        target: 'plugins-install',
+        label: t('prefs.pluginsInstallTitle'),
+        description: t('prefs.pluginsInstallDesc'),
+        keywords:
+          'plugin install instalar manifest manifesto json folder pasta uninstall desinstalar trust confiar',
+      },
+      {
+        category: 'appearance',
+        target: 'terminal-theme',
+        label: t('prefs.terminalTheme'),
+        description: t('prefs.terminalThemeDesc'),
+        keywords: 'terminal theme tema colors cores',
+      },
+      {
+        category: 'voice',
+        target: 'voice-providers',
+        label: t('prefs.categoryVoice'),
+        description: t('prefs.categoryVoiceDesc'),
+        keywords: 'voice speech providers api keys servers models download hugging face',
+      },
+      {
+        category: 'terminal',
+        target: 'resource-policy',
+        label: t('prefs.resourcePolicy'),
+        description: t('prefs.resourcePolicyDesc'),
+        keywords: 'memory ram performance budget limit lru suspend memória desempenho limite',
+      },
+      {
+        category: 'playbooks',
+        target: 'playbooks',
+        label: t('prefs.categoryPlaybooks'),
+        description: t('prefs.categoryPlaybooksDesc'),
+        keywords:
+          'playbooks flow flowchart diagram fluxo fluxograma diagrama tiers profile perfil quota cota 剧本 流程图',
+      },
+      {
+        category: 'orchestration',
+        target: 'orchestration-roles',
+        label: t('prefs.orchestrationRoles'),
+        description: t('prefs.orchestrationRolesDesc'),
+        keywords:
+          'orchestration orquestração role papel model modelo effort esforço reviewer revisor read-only',
+      },
+      {
+        category: 'orchestration',
+        target: 'orchestration-limits',
+        label: t('prefs.orchestrationLimits'),
+        description: t('prefs.orchestrationLimitsDesc'),
+        keywords:
+          'orchestration orquestração workers concurrency paralelo timeout budget orçamento',
+      },
+      {
+        category: 'orchestration',
+        target: 'orchestration-routing',
+        label: t('prefs.orchestrationRouting'),
+        description: t('prefs.orchestrationRoutingDesc'),
+        keywords:
+          'orchestration routing roteamento preset regras rules delegate economy balanced performance custom 路由 规则 预设',
+      },
+      {
+        category: 'orchestration',
+        target: 'orchestration-routing',
+        label: t('prefs.routingCriticalThreshold'),
+        description: t('prefs.routingCriticalThresholdHint'),
+        keywords: 'quota cota critical crítico threshold limite opus gate 配额 阈值 临界',
+      },
+      {
+        category: 'terminal',
+        target: 'spawn-concurrency',
+        label: t('prefs.spawnConcurrency'),
+        description: t('prefs.spawnConcurrencyDesc'),
+        keywords: 'spawn concurrency parallel paralelo fila queue performance pty',
+      },
+      {
+        category: 'terminal',
+        target: 'agents',
+        label: t('prefs.agentsTitle'),
+        description: t('prefs.agentsDesc'),
+        keywords: 'agents agentes claude codex opencode shell 智能体 代理 代理程序',
+      },
+      {
+        category: 'terminal',
+        target: 'agent-canvas-permissions',
+        label: t('prefs.experimentalPermissions'),
+        description: t('prefs.experimentalPermissionsDesc'),
+        keywords:
+          'permission permissions ask bypass approval canvas sandbox worker skip dangerously permissão permissões aprovação 权限 审批',
+      },
+      {
+        category: 'terminal',
+        target: 'reset-session',
+        label: t('prefs.resetSession'),
+        description: t('prefs.resetSessionDesc'),
+        keywords:
+          'reset session resume retomar resetar sessão última last recover recuperar resume crash boot',
+      },
+      {
+        category: 'integrations',
+        target: 'usage-access',
+        label: t('prefs.usageAccess'),
+        description: t('prefs.usageAccessDesc'),
+        keywords:
+          'usage quota limits consent privacy credentials claude codex antigravity uso limite privacidade credenciais',
+      },
+      {
+        category: 'integrations',
+        target: 'terminal-command',
+        label: t('prefs.cliCommand'),
+        description: t('prefs.cliCommandDesc'),
+        keywords: 'cli command terminal path shell comando linha de comando abrir pasta',
+      },
+      {
+        category: 'integrations',
+        target: 'router9',
+        label: t('router9.title'),
+        description: t('router9.desc'),
+        keywords:
+          '9router router proxy roteador rate limit fallback provider provedor base url api key chave anthropic openai',
+      },
+      {
+        category: 'integrations',
+        target: 'spotify',
+        label: t('prefs.spotify'),
+        description: t('prefs.spotifyDesc'),
+        keywords: 'spotify music música client id secret',
+      },
+      {
+        category: 'integrations',
+        target: 'discord',
+        label: t('prefs.discordPresence'),
+        description: t('prefs.discordPresenceHint'),
+        keywords: 'discord rich presence status integração',
+      },
+      ...contributedSettings.map((section): SearchItem => ({
+        category: 'integrations',
+        target: section.id,
+        label: section.title(),
+        description: section.description?.() ?? '',
+        keywords: section.keywords ?? '',
+      })),
+      {
+        category: 'tutorials',
+        target: 'tutorials-videos',
+        label: t('tutorials.videosTitle'),
+        description: t('tutorials.videosDesc'),
+        keywords:
+          'tutorial tutorials video videos youtube learn guide help aprender ajuda guia vídeo 教程 视频 帮助',
+      },
+      {
+        category: 'about',
+        target: 'app-version',
+        label: t('prefs.aboutVersionTitle'),
+        description: t('prefs.aboutVersionDesc'),
+        keywords: 'version versão about sobre build info app',
+      },
+      {
+        category: 'about',
+        target: 'app-updates',
+        label: t('prefs.aboutUpdatesTitle'),
+        description: t('prefs.aboutUpdatesDesc'),
+        keywords: 'update atualização atualizar upgrade nova versão release check 更新 升级 版本',
+      },
+      {
+        category: 'about',
+        target: 'app-creator',
+        label: t('prefs.aboutCreatorTitle'),
+        description: t('prefs.aboutCreatorDesc'),
+        keywords: 'creator author owner maintainer kc1t kaua miguel criador autor dono 作者 维护者',
+      },
+      {
+        category: 'about',
+        target: 'app-older-versions',
+        label: t('prefs.aboutOlderTitle'),
+        description: t('prefs.aboutOlderDesc'),
+        keywords:
+          'downgrade older previous version rollback release versão anterior antiga voltar 降级 旧版本 回滚',
+      },
+      {
+        category: 'about',
+        target: 'app-contribute',
+        label: t('prefs.aboutContributeTitle'),
+        description: t('prefs.aboutContributeDesc'),
+        keywords:
+          'contribute pull request pr issue bug feature github open source contribuir relatar 贡献 问题 拉取请求',
+      },
+      {
+        category: 'about',
+        target: 'app-info',
+        label: t('prefs.aboutInfoTitle'),
+        description: t('prefs.aboutInfoDesc'),
+        keywords:
+          'license privacy source code data folder logs licença privacidade código pasta dados 许可证 隐私 源代码 日志',
+      },
+    ],
+    [contributedSettings, t],
+  )
+
+  useEffect(() => {
+    if (!open || modalContext?.category !== 'remoteControl') return
+    setCategory('remoteControl')
+  }, [open, modalContext])
+
+  const results = useMemo(() => {
+    const normalized = query.trim().toLocaleLowerCase(preferences.language)
+    if (!normalized) return []
+    return searchItems.filter((item) =>
+      `${item.label} ${item.description} ${item.keywords}`
+        .toLocaleLowerCase(preferences.language)
+        .includes(normalized),
+    )
+  }, [preferences.language, query, searchItems])
+
+  const activeCategory = categories.find((item) => item.id === category) ?? categories[0]
+  const avatarUrl = getProfileImageUrl(preferences)
+  const displayName = preferences.displayName || t('profile.fallbackName')
+  const initial = getProfileInitial(displayName)
+  const enabledCount = Object.values(preferences.enabledAgents).filter(Boolean).length
+
+  useEffect(() => {
+    if (!open) return
+    const initial = (modalContext?.category as CategoryId) ?? 'account'
+    setCategory(initial)
+    setQuery('')
+    setResultCursor(0)
+    // A caller can open the modal on one specific setting, the same way a search result does.
+    setPendingTarget(typeof modalContext?.target === 'string' ? modalContext.target : null)
+  }, [open, modalContext])
+
+  useEffect(() => {
+    setResultCursor(0)
+  }, [query])
+
+  useEffect(() => {
+    if (!pendingTarget) return
+    // Jumping to a folded section would land on a closed heading, so open it before scrolling.
+    setSectionCollapsed(pendingTarget, false)
+    const frame = window.requestAnimationFrame(() => {
+      const target = contentRef.current?.querySelector<HTMLElement>(
+        `[data-setting-id="${pendingTarget}"]`,
+      )
+      target?.scrollIntoView({ block: 'start', behavior: 'smooth' })
+      target?.focus({ preventScroll: true })
+      setPendingTarget(null)
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [category, pendingTarget])
+
+  const openSearchResult = (item: SearchItem) => {
+    setCategory(item.category)
+    setPendingTarget(item.target)
+    setQuery('')
+  }
+
+  const onSearchKeyDown = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'ArrowDown' && results.length > 0) {
+      event.preventDefault()
+      setResultCursor((cursor) => (cursor + 1) % results.length)
+    } else if (event.key === 'ArrowUp' && results.length > 0) {
+      event.preventDefault()
+      setResultCursor((cursor) => (cursor - 1 + results.length) % results.length)
+    } else if (event.key === 'Enter' && results[resultCursor]) {
+      event.preventDefault()
+      openSearchResult(results[resultCursor])
+    } else if (event.key === 'Escape' && query) {
+      event.preventDefault()
+      event.stopPropagation()
+      setQuery('')
+    }
+  }
+
+  return (
+    <Dialog.Root open={open} onOpenChange={(nextOpen) => !nextOpen && open && closeModal()}>
+      <Dialog.Portal>
+        <Dialog.Overlay className={styles.overlay} />
+        <Dialog.Content
+          ref={dialogRef}
+          className={styles.dialog}
+          aria-describedby={undefined}
+          onEscapeKeyDown={(event) => {
+            if (document.querySelector('[data-coding-agent-dropdown-menu]')) event.preventDefault()
+          }}
+          onOpenAutoFocus={(event) => {
+            event.preventDefault()
+            const input =
+              dialogRef.current?.querySelector<HTMLInputElement>('[data-settings-search]')
+            input?.focus()
+          }}
+        >
+          <Dialog.Title className={styles.srOnly}>{t('prefs.title')}</Dialog.Title>
+
+          <aside className={styles.sidebar}>
+            <button
+              type="button"
+              className={styles.profileButton}
+              onClick={() => setCategory('account')}
+            >
+              <Avatar url={avatarUrl} initial={initial} />
+              <span className={styles.profileCopy}>
+                <strong>{displayName}</strong>
+                <span>{t('prefs.editProfile')}</span>
+              </span>
+              <ChevronRight size={14} />
+            </button>
+
+            <div className={styles.searchWrap}>
+              <Search size={15} aria-hidden />
+              <input
+                data-settings-search
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                onKeyDown={onSearchKeyDown}
+                placeholder={t('prefs.searchPlaceholder')}
+                aria-label={t('prefs.searchPlaceholder')}
+                aria-expanded={Boolean(query)}
+              />
+              {query ? (
+                <button
+                  type="button"
+                  onClick={() => setQuery('')}
+                  aria-label={t('prefs.clearSearch')}
+                >
+                  <X size={13} />
+                </button>
+              ) : null}
+            </div>
+
+            {query ? (
+              <div className={styles.searchResults} role="listbox">
+                {results.length > 0 ? (
+                  results.map((item, index) => (
+                    <button
+                      key={`${item.category}:${item.target}`}
+                      type="button"
+                      role="option"
+                      aria-selected={index === resultCursor}
+                      className={index === resultCursor ? styles.searchResultActive : undefined}
+                      onMouseEnter={() => setResultCursor(index)}
+                      onClick={() => openSearchResult(item)}
+                    >
+                      <strong>{item.label}</strong>
+                      <span>{categories.find((entry) => entry.id === item.category)?.label}</span>
+                    </button>
+                  ))
+                ) : (
+                  <div className={styles.searchEmpty}>{t('prefs.noSearchResults')}</div>
+                )}
+              </div>
+            ) : (
+              <nav className={styles.nav} aria-label={t('prefs.title')}>
+                <span className={styles.navLabel}>{t('prefs.settingsLabel')}</span>
+                {categories.map(({ id, label, description, Icon }) => (
+                  <button
+                    key={id}
+                    type="button"
+                    className={category === id ? styles.navActive : undefined}
+                    aria-current={category === id ? 'page' : undefined}
+                    onClick={() => {
+                      setCategory(id)
+                      contentRef.current?.scrollTo({ top: 0 })
+                    }}
+                  >
+                    <Icon size={16} />
+                    <span className={styles.navCopy}>
+                      <strong>{label}</strong>
+                      <small>{description}</small>
+                    </span>
+                  </button>
+                ))}
+              </nav>
+            )}
+          </aside>
+
+          <main className={styles.main}>
+            <header className={styles.header}>
+              <div>
+                <h1>{activeCategory.label}</h1>
+                <p>{activeCategory.description}</p>
+              </div>
+              <Dialog.Close asChild>
+                <button type="button" className={styles.close} aria-label={t('common.close')}>
+                  <X size={18} />
+                </button>
+              </Dialog.Close>
+            </header>
+
+            <div
+              ref={contentRef}
+              className={category === 'playbooks' ? styles.contentFill : styles.content}
+            >
+              <div
+                className={category === 'playbooks' ? styles.contentFillInner : styles.contentInner}
+              >
+                <ErrorBoundary label="preferences-page">
+                  {category === 'account' ? (
+                    <AccountPage
+                      avatarUrl={avatarUrl}
+                      initial={initial}
+                      onManageAccounts={() => openModal('profiles')}
+                    />
+                  ) : null}
+                  {category === 'appearance' ? <AppearancePage /> : null}
+                  {category === 'features' ? <FeaturesPage /> : null}
+                  {category === 'plugins' ? <PluginsPage /> : null}
+                  {category === 'voice' ? <VoicePage /> : null}
+                  {category === 'terminal' ? <TerminalPage enabledCount={enabledCount} /> : null}
+                  {category === 'integrations' ? <IntegrationsPage /> : null}
+                  {category === 'multiagent' ? <MultiagentPage /> : null}
+                  {category === 'orchestration' ? (
+                    <OrchestrationPage onOpenPlaybooks={() => setCategory('playbooks')} />
+                  ) : null}
+                  {category === 'playbooks' ? <PlaybooksPage /> : null}
+                  {category === 'organization' ? <OrganizationPage /> : null}
+                  {category === 'tutorials' ? <TutorialsPage /> : null}
+                  {category === 'about' ? <AboutPage /> : null}
+                  {category === 'remoteControl' ? <RemoteControlPage /> : null}
+                </ErrorBoundary>
+              </div>
+            </div>
+          </main>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  )
+}

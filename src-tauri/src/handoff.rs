@@ -1,0 +1,1570 @@
+use regex::Regex;
+use serde::Serialize;
+use serde_json::Value;
+use std::fs::{self, OpenOptions};
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use tauri::AppHandle;
+
+use crate::provider_common::{normalize_cwd, provider_scope, ProviderScope};
+
+const MAX_SOURCE_LINE_BYTES: usize = 2 * 1024 * 1024;
+const DRAFT_CHAR_LIMIT: usize = 48_000;
+const MATERIALIZED_BYTE_LIMIT: usize = 64 * 1024;
+const HANDOFF_ID_ATTEMPTS: usize = 16;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Provider {
+    Claude,
+    Codex,
+}
+
+impl Provider {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "claude" => Ok(Self::Claude),
+            "codex" => Ok(Self::Codex),
+            _ => Err("handoff supports only claude and codex".to_string()),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+        }
+    }
+}
+
+/// How much of the source conversation a handoff carries to the other agent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HandoffScope {
+    /// User and assistant messages, tool activity and filename-bearing Git detail.
+    Full,
+    /// User-authored messages and counts-only Git metadata.
+    UserOnly,
+}
+
+impl HandoffScope {
+    /// Only the exact full-scope name widens the transfer; anything else is restrictive.
+    fn parse(value: &str) -> Self {
+        match value {
+            "full" => Self::Full,
+            _ => Self::UserOnly,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct HandoffEvent {
+    role: &'static str,
+    text: String,
+    #[serde(rename = "questionSetId", skip_serializing_if = "Option::is_none")]
+    question_set_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    questions: Option<Vec<RemoteQuestion>>,
+    /// What a tool call does, in the few fields the voice narrator says ("Editing auth.ts").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool: Option<ToolSummary>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct ToolSummary {
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+}
+
+pub(crate) struct ActiveRemoteQuestions {
+    pub id: String,
+    pub questions: Vec<RemoteQuestion>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RemoteQuestion {
+    pub id: String,
+    pub header: String,
+    pub question: String,
+    pub multi_select: bool,
+    pub options: Vec<RemoteQuestionOption>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct RemoteQuestionOption {
+    pub label: String,
+    pub description: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TranscriptSnapshot {
+    pub session_id: Option<String>,
+    pub revision: u64,
+    pub unchanged: bool,
+    /// Absolute index of `messages[0]` among every event of the transcript.
+    pub first_index: usize,
+    pub messages: Vec<HandoffEvent>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HandoffDraft {
+    source_provider: String,
+    target_provider: String,
+    source_session_id: String,
+    cwd: String,
+    title: String,
+    content: String,
+    included_event_count: usize,
+    omitted_event_count: usize,
+    redaction_count: usize,
+    used_fallback: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HandoffArtifact {
+    handoff_id: String,
+    context_dir: String,
+    context_path: String,
+}
+
+fn read_capped_line(reader: &mut impl BufRead, buf: &mut Vec<u8>) -> std::io::Result<bool> {
+    buf.clear();
+    let mut consumed_any = false;
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return Ok(consumed_any);
+        }
+        consumed_any = true;
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let chunk_len = newline.unwrap_or(available.len());
+        if buf.len() < MAX_SOURCE_LINE_BYTES {
+            let take = chunk_len.min(MAX_SOURCE_LINE_BYTES - buf.len());
+            buf.extend_from_slice(&available[..take]);
+        }
+        match newline {
+            Some(index) => {
+                reader.consume(index + 1);
+                return Ok(true);
+            }
+            None => {
+                let len = available.len();
+                reader.consume(len);
+            }
+        }
+    }
+}
+
+fn clipped(value: &str, max_chars: usize) -> String {
+    let value = value.trim();
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let mut result: String = value.chars().take(max_chars.saturating_sub(1)).collect();
+    result.push('…');
+    result
+}
+
+fn content_text(content: &Value) -> String {
+    match content {
+        Value::String(text) => text.clone(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|block| {
+                let kind = block.get("type").and_then(Value::as_str).unwrap_or("");
+                match kind {
+                    "text" | "input_text" | "output_text" => block
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned),
+                    _ => None,
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+fn remote_questions(name: &str, input: &Value) -> Option<Vec<RemoteQuestion>> {
+    if !name.eq_ignore_ascii_case("AskUserQuestion")
+        && !name.eq_ignore_ascii_case("request_user_input")
+    {
+        return None;
+    }
+    let parsed;
+    let input = if let Value::String(value) = input {
+        parsed = serde_json::from_str::<Value>(value).ok()?;
+        &parsed
+    } else {
+        input
+    };
+    let questions = input.get("questions")?.as_array()?;
+    let result = questions
+        .iter()
+        .take(3)
+        .enumerate()
+        .filter_map(|(index, value)| {
+            let question = clipped(value.get("question")?.as_str()?, 1_000);
+            let options = value
+                .get("options")?
+                .as_array()?
+                .iter()
+                .take(8)
+                .filter_map(|option| {
+                    let label = clipped(option.get("label")?.as_str()?, 160);
+                    (!label.is_empty()).then(|| RemoteQuestionOption {
+                        label,
+                        description: clipped(
+                            option
+                                .get("description")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default(),
+                            500,
+                        ),
+                    })
+                })
+                .collect::<Vec<_>>();
+            (!question.is_empty() && !options.is_empty()).then(|| RemoteQuestion {
+                id: value
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(|id| clipped(id, 80))
+                    .unwrap_or_else(|| format!("question-{}", index + 1)),
+                header: clipped(
+                    value
+                        .get("header")
+                        .and_then(Value::as_str)
+                        .unwrap_or("Question"),
+                    80,
+                ),
+                question,
+                multi_select: value
+                    .get("multiSelect")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                options,
+            })
+        })
+        .collect::<Vec<_>>();
+    (!result.is_empty()).then_some(result)
+}
+
+fn question_text(questions: &[RemoteQuestion]) -> String {
+    questions
+        .iter()
+        .map(|question| {
+            let options = question
+                .options
+                .iter()
+                .map(|option| option.label.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{}: {} ({options})", question.header, question.question)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn thinking_event(text: &str) -> HandoffEvent {
+    HandoffEvent {
+        role: "thinking",
+        text: clipped(text, 5_000),
+        question_set_id: None,
+        questions: None,
+        tool: None,
+    }
+}
+
+/// The name of a tool call and the parts of its input worth saying. Claude passes an object;
+/// Codex a JSON string (`function_call`) or raw text (`custom_tool_call`, such as a patch).
+fn tool_summary(name: &str, input: &Value) -> ToolSummary {
+    let parsed;
+    let input = match input {
+        Value::String(text) => match serde_json::from_str::<Value>(text) {
+            Ok(value @ Value::Object(_)) => {
+                parsed = value;
+                &parsed
+            }
+            _ => input,
+        },
+        _ => input,
+    };
+    let field = |key: &str| {
+        input
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+    };
+    let command = match input.get("command").or_else(|| input.get("cmd")) {
+        Some(Value::String(command)) => Some(command.clone()),
+        // `["bash", "-lc", "npm test"]`: the script is the last part.
+        Some(Value::Array(parts)) => {
+            let parts: Vec<&str> = parts.iter().filter_map(Value::as_str).collect();
+            match parts.as_slice() {
+                [shell, flag, script] if shell.ends_with("sh") && flag.starts_with('-') => {
+                    Some((*script).to_string())
+                }
+                _ => Some(parts.join(" ")),
+            }
+        }
+        _ => None,
+    };
+    // A patch names its files on `*** Update File: …` lines; the first is said.
+    let patch = input
+        .as_str()
+        .or_else(|| field("input"))
+        .or_else(|| field("patch"));
+    let patched = patch.and_then(|patch| {
+        patch.lines().find_map(|line| {
+            ["*** Update File: ", "*** Add File: ", "*** Delete File: "]
+                .iter()
+                .find_map(|prefix| line.strip_prefix(prefix))
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+        })
+    });
+    let path = field("file_path")
+        .or_else(|| field("notebook_path"))
+        .or_else(|| field("path"))
+        .or(patched);
+    ToolSummary {
+        name: clipped(name, 120),
+        command: command
+            .map(|command| clipped(&command, 300))
+            .filter(|command| !command.is_empty()),
+        path: path.map(|path| clipped(path, 300)),
+        description: field("description").map(|text| clipped(text, 200)),
+    }
+}
+
+/// `reasoning` adds the agent's thinking as `thinking` events (the voice narrator's view only:
+/// handoffs and the remote view never carry it).
+fn claude_events(path: &Path, reasoning: bool) -> Result<Vec<HandoffEvent>, String> {
+    let file = fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut reader = BufReader::with_capacity(64 * 1024, file);
+    let mut buf = Vec::with_capacity(8 * 1024);
+    let mut events = Vec::new();
+    while read_capped_line(&mut reader, &mut buf).map_err(|error| error.to_string())? {
+        let Ok(line) = std::str::from_utf8(&buf) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if value.get("isSidechain").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        let kind = value.get("type").and_then(Value::as_str).unwrap_or("");
+        if kind != "user" && kind != "assistant" {
+            continue;
+        }
+        let content = value
+            .get("message")
+            .and_then(|message| message.get("content"))
+            .unwrap_or(&Value::Null);
+        if reasoning && kind == "assistant" {
+            // Thinking comes before the text it led to; a redacted block has no text to say.
+            for block in content.as_array().into_iter().flatten() {
+                if block.get("type").and_then(Value::as_str) != Some("thinking") {
+                    continue;
+                }
+                let thought = block.get("thinking").and_then(Value::as_str).unwrap_or("");
+                if !thought.trim().is_empty() {
+                    events.push(thinking_event(thought));
+                }
+            }
+        }
+        let text = content_text(content);
+        if !text.trim().is_empty() {
+            events.push(HandoffEvent {
+                role: if kind == "user" { "user" } else { "assistant" },
+                text: clipped(&text, if kind == "user" { 8_000 } else { 5_000 }),
+                question_set_id: None,
+                questions: None,
+                tool: None,
+            });
+        }
+        let Value::Array(blocks) = content else {
+            continue;
+        };
+        for block in blocks {
+            match block.get("type").and_then(Value::as_str).unwrap_or("") {
+                "tool_use" => {
+                    let name = block.get("name").and_then(Value::as_str).unwrap_or("tool");
+                    let input = block.get("input").cloned().unwrap_or(Value::Null);
+                    let questions = remote_questions(name, &input);
+                    let tool = questions.is_none().then(|| tool_summary(name, &input));
+                    let question_set_id = questions.as_ref().map(|_| {
+                        clipped(
+                            block
+                                .get("id")
+                                .and_then(Value::as_str)
+                                .unwrap_or("claude-question"),
+                            160,
+                        )
+                    });
+                    events.push(HandoffEvent {
+                        role: if questions.is_some() {
+                            "question"
+                        } else {
+                            "tool"
+                        },
+                        text: questions
+                            .as_deref()
+                            .map(question_text)
+                            .unwrap_or_else(|| clipped(&format!("{name}: {input}"), 1_200)),
+                        question_set_id,
+                        questions,
+                        tool,
+                    });
+                }
+                "tool_result" => {
+                    let output = block.get("content").map(content_text).unwrap_or_default();
+                    if !output.trim().is_empty() {
+                        events.push(HandoffEvent {
+                            role: "tool-result",
+                            text: clipped(&output, 800),
+                            question_set_id: None,
+                            questions: None,
+                            tool: None,
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(events)
+}
+
+/// `reasoning` adds Codex's reasoning summaries as `thinking` events, as for `claude_events`.
+fn codex_events(path: &Path, reasoning: bool) -> Result<Vec<HandoffEvent>, String> {
+    let file = fs::File::open(path).map_err(|error| error.to_string())?;
+    let mut reader = BufReader::with_capacity(64 * 1024, file);
+    let mut buf = Vec::with_capacity(8 * 1024);
+    let mut events = Vec::new();
+    while read_capped_line(&mut reader, &mut buf).map_err(|error| error.to_string())? {
+        let Ok(line) = std::str::from_utf8(&buf) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if value.get("type").and_then(Value::as_str) != Some("response_item") {
+            continue;
+        }
+        let Some(payload) = value.get("payload") else {
+            continue;
+        };
+        match payload.get("type").and_then(Value::as_str).unwrap_or("") {
+            "message" => {
+                let role = payload.get("role").and_then(Value::as_str).unwrap_or("");
+                if role != "user" && role != "assistant" {
+                    continue;
+                }
+                let text = payload.get("content").map(content_text).unwrap_or_default();
+                if !text.trim().is_empty() {
+                    events.push(HandoffEvent {
+                        role: if role == "user" { "user" } else { "assistant" },
+                        text: clipped(&text, if role == "user" { 8_000 } else { 5_000 }),
+                        question_set_id: None,
+                        questions: None,
+                        tool: None,
+                    });
+                }
+            }
+            "custom_tool_call" | "function_call" => {
+                let name = payload
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("tool");
+                let input = payload
+                    .get("input")
+                    .or_else(|| payload.get("arguments"))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                let questions = remote_questions(name, &input);
+                let tool = questions.is_none().then(|| tool_summary(name, &input));
+                let question_set_id = questions.as_ref().map(|_| {
+                    clipped(
+                        payload
+                            .get("call_id")
+                            .or_else(|| payload.get("id"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("codex-question"),
+                        160,
+                    )
+                });
+                events.push(HandoffEvent {
+                    role: if questions.is_some() {
+                        "question"
+                    } else {
+                        "tool"
+                    },
+                    text: questions
+                        .as_deref()
+                        .map(question_text)
+                        .unwrap_or_else(|| clipped(&format!("{name}: {input}"), 1_200)),
+                    question_set_id,
+                    questions,
+                    tool,
+                });
+            }
+            "reasoning" if reasoning => {
+                // The summary Codex shows while it works; `content` holds raw reasoning for the
+                // models that expose it. Encrypted reasoning has neither.
+                let thought = ["summary", "content"]
+                    .iter()
+                    .filter_map(|key| payload.get(*key).and_then(Value::as_array))
+                    .flatten()
+                    .filter_map(|part| part.get("text").and_then(Value::as_str))
+                    .filter(|text| !text.trim().is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                if !thought.is_empty() {
+                    events.push(thinking_event(&thought));
+                }
+            }
+            "custom_tool_call_output" | "function_call_output" => {
+                let output = payload.get("output").map(content_text).unwrap_or_default();
+                if !output.trim().is_empty() {
+                    events.push(HandoffEvent {
+                        role: "tool-result",
+                        text: clipped(&output, 800),
+                        question_set_id: None,
+                        questions: None,
+                        tool: None,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(events)
+}
+
+fn codex_session_meta(path: &Path) -> Option<(String, String)> {
+    let file = fs::File::open(path).ok()?;
+    let mut reader = BufReader::new(file);
+    let mut first = String::new();
+    reader.read_line(&mut first).ok()?;
+    let value = serde_json::from_str::<Value>(&first).ok()?;
+    let payload = value.get("payload")?;
+    Some((
+        payload.get("id")?.as_str()?.to_string(),
+        payload.get("cwd")?.as_str()?.to_string(),
+    ))
+}
+
+fn session_matches_scope(scope: &ProviderScope, session_cwd: &str) -> bool {
+    scope.normalize(session_cwd) == scope.match_key()
+}
+
+fn resolve_source_file(
+    provider: Provider,
+    cwd: &str,
+    requested_id: Option<&str>,
+) -> Result<(String, PathBuf, bool), String> {
+    let normalized = normalize_cwd(cwd);
+    if normalized.is_empty() || !Path::new(cwd).is_dir() {
+        return Err("handoff cwd does not exist".to_string());
+    }
+    let mut candidates: Vec<(String, PathBuf, std::time::SystemTime)> = Vec::new();
+    match provider {
+        Provider::Claude => {
+            for dir in crate::claude_sessions::project_dirs_for_cwd(cwd)? {
+                let Ok(entries) = fs::read_dir(dir) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|value| value.to_str()) != Some("jsonl") {
+                        continue;
+                    }
+                    let Some(id) = path
+                        .file_stem()
+                        .map(|value| value.to_string_lossy().to_string())
+                    else {
+                        continue;
+                    };
+                    let modified = entry
+                        .metadata()
+                        .and_then(|metadata| metadata.modified())
+                        .unwrap_or(std::time::UNIX_EPOCH);
+                    candidates.push((id, path, modified));
+                }
+            }
+        }
+        Provider::Codex => {
+            let scope = provider_scope(cwd, &[".codex", "sessions"]);
+            match scope {
+                Some(scope) => {
+                    let mut files = Vec::new();
+                    crate::codex_sessions::collect_jsonl_files(&scope.root, &mut files);
+                    for path in files {
+                        let Some((id, session_cwd)) = codex_session_meta(&path) else {
+                            continue;
+                        };
+                        if !session_matches_scope(&scope, &session_cwd) {
+                            continue;
+                        }
+                        let modified = fs::metadata(&path)
+                            .and_then(|metadata| metadata.modified())
+                            .unwrap_or(std::time::UNIX_EPOCH);
+                        candidates.push((id, path, modified));
+                    }
+                }
+                None if crate::wsl::wsl_target(cwd).is_some() => {}
+                None => return Err("Codex sessions directory is unavailable".to_string()),
+            }
+        }
+    }
+    if let Some(requested) = requested_id.filter(|value| !value.trim().is_empty()) {
+        return candidates
+            .into_iter()
+            .find(|(id, _, _)| id == requested)
+            .map(|(id, path, _)| (id, path, false))
+            .ok_or_else(|| {
+                "session not found for this provider and working directory".to_string()
+            });
+    }
+    candidates.sort_by(|left, right| right.2.cmp(&left.2));
+    candidates
+        .into_iter()
+        .next()
+        .map(|(id, path, _)| (id, path, true))
+        .ok_or_else(|| "no session found for this provider and working directory".to_string())
+}
+
+/// The remote chat view reads the same transcripts the handoff capsule does.
+/// `since` carries the last revision the caller saw, so an unchanged file skips
+/// the parse entirely and the phone can poll cheaply.
+pub(crate) fn transcript_snapshot(
+    provider: &str,
+    cwd: &str,
+    session_id: Option<&str>,
+    since: Option<u64>,
+    limit: usize,
+    reasoning: bool,
+) -> Result<TranscriptSnapshot, String> {
+    let provider = Provider::parse(provider)?;
+    let resolved = resolve_source_file(provider, cwd, session_id)
+        .or_else(|_| resolve_source_file(provider, cwd, None));
+    let Ok((id, path, _)) = resolved else {
+        return Ok(TranscriptSnapshot {
+            session_id: None,
+            revision: 0,
+            unchanged: false,
+            first_index: 0,
+            messages: Vec::new(),
+        });
+    };
+    let revision = fs::metadata(&path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0);
+    if revision != 0 && since == Some(revision) {
+        return Ok(TranscriptSnapshot {
+            session_id: Some(id),
+            revision,
+            unchanged: true,
+            first_index: 0,
+            messages: Vec::new(),
+        });
+    }
+    let events = match provider {
+        Provider::Claude => claude_events(&path, reasoning)?,
+        Provider::Codex => codex_events(&path, reasoning)?,
+    };
+    let (first_index, messages) = tail(events, limit);
+    Ok(TranscriptSnapshot {
+        session_id: Some(id),
+        revision,
+        unchanged: false,
+        first_index,
+        messages,
+    })
+}
+
+fn tail<T>(mut items: Vec<T>, limit: usize) -> (usize, Vec<T>) {
+    let dropped = items.len().saturating_sub(limit);
+    items.drain(..dropped);
+    (dropped, items)
+}
+
+const VOICE_TRANSCRIPT_EVENTS: usize = 160;
+
+/// The voice narrator's view of a session transcript. `since` makes an unchanged file cheap.
+#[tauri::command]
+pub async fn agent_transcript_snapshot(
+    provider: String,
+    cwd: String,
+    session_id: Option<String>,
+    since: Option<u64>,
+) -> Result<TranscriptSnapshot, String> {
+    tokio::task::spawn_blocking(move || {
+        transcript_snapshot(
+            &provider,
+            &cwd,
+            session_id.as_deref(),
+            since,
+            VOICE_TRANSCRIPT_EVENTS,
+            true,
+        )
+    })
+    .await
+    .map_err(|error| format!("agent_transcript_snapshot: {error}"))?
+}
+
+pub(crate) fn active_remote_questions(
+    provider: &str,
+    cwd: &str,
+    session_id: Option<&str>,
+) -> Result<Option<ActiveRemoteQuestions>, String> {
+    let provider = Provider::parse(provider)?;
+    let (_, path, _) = resolve_source_file(provider, cwd, session_id)
+        .or_else(|_| resolve_source_file(provider, cwd, None))?;
+    let events = match provider {
+        Provider::Claude => claude_events(&path, false)?,
+        Provider::Codex => codex_events(&path, false)?,
+    };
+    Ok(events.last().and_then(|event| {
+        event
+            .questions
+            .clone()
+            .map(|questions| ActiveRemoteQuestions {
+                id: event.question_set_id.clone().unwrap_or_default(),
+                questions,
+            })
+    }))
+}
+
+fn run_git(cwd: &str, args: &[&str]) -> Option<String> {
+    let output = crate::git_control::git_process(cwd, &[])
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!text.is_empty()).then_some(text)
+}
+
+fn workspace_context(cwd: &str, scope: HandoffScope) -> String {
+    let Some(root) = run_git(cwd, &["rev-parse", "--show-toplevel"]) else {
+        return "- Git repository: not detected\n".to_string();
+    };
+    let branch = run_git(cwd, &["branch", "--show-current"]).unwrap_or_else(|| "detached".into());
+    let head = run_git(cwd, &["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".into());
+    if scope == HandoffScope::Full {
+        let status = run_git(cwd, &["status", "--short"]).unwrap_or_else(|| "clean".into());
+        let stat = run_git(cwd, &["diff", "--stat", "HEAD"]).unwrap_or_else(|| "none".into());
+        return format!("- Repository root: {root}\n- Branch: {branch}\n- HEAD: {head}\n- Working tree:\n```text\n{}\n```\n- Diff stat:\n```text\n{}\n```\n", clipped(&status, 5_000), clipped(&stat, 5_000));
+    }
+    // Status and diff output name files, so the restrictive scope keeps only their counts.
+    let changed_entries = run_git(cwd, &["status", "--porcelain=v1"])
+        .map(|status| status.lines().count())
+        .unwrap_or(0);
+    let diff_summary = run_git(cwd, &["diff", "--shortstat", "HEAD"])
+        .unwrap_or_else(|| "no unstaged or staged line changes".into());
+    format!(
+        "- Repository root: {}\n- Branch: {}\n- HEAD: {}\n- Changed working-tree entries: {changed_entries}\n- Diff summary: {}\n",
+        clipped(&root.replace(['\r', '\n'], " "), 1_000),
+        clipped(&branch.replace(['\r', '\n'], " "), 250),
+        clipped(&head.replace(['\r', '\n'], " "), 100),
+        clipped(&diff_summary.replace(['\r', '\n'], " "), 250),
+    )
+}
+
+fn redaction_patterns() -> &'static Vec<Regex> {
+    static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+    PATTERNS.get_or_init(|| [
+        r"(?i)\b(?:sk-(?:proj-|ant-)?|gh[pousr]_|AKIA|AIza)[A-Za-z0-9_\-]{8,}",
+        r"\beyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\b",
+        r"(?is)-----BEGIN [^-\r\n]*PRIVATE KEY-----.*?-----END [^-\r\n]*PRIVATE KEY-----",
+        r"(?im)^(?:Authorization|Proxy-Authorization|Set-Cookie):\s*.+$",
+        r#"(?i)\b[A-Z0-9_]*(?:SECRET|TOKEN|PASSWORD|API_KEY|CREDENTIAL)[A-Z0-9_]*\s*[=:]\s*[\"']?[^\s\"']{6,}"#,
+    ].into_iter().map(|pattern| Regex::new(pattern).expect("valid handoff redaction regex")).collect())
+}
+
+fn redact(mut content: String) -> (String, usize) {
+    let mut count = 0;
+    for pattern in redaction_patterns() {
+        count += pattern.find_iter(&content).count();
+        content = pattern.replace_all(&content, "[REDACTED]").into_owned();
+    }
+    (content, count)
+}
+
+fn append_section(output: &mut String, heading: &str, body: &str) {
+    if body.trim().is_empty() {
+        return;
+    }
+    output.push_str("\n## ");
+    output.push_str(heading);
+    output.push_str("\n\n");
+    output.push_str(body.trim());
+    output.push('\n');
+}
+
+/// Returns the capsule with the number of events it carries and the number it leaves out.
+fn render_capsule(
+    source: Provider,
+    target: Provider,
+    session_id: &str,
+    cwd: &str,
+    events: &[HandoffEvent],
+    scope: HandoffScope,
+) -> (String, usize, usize) {
+    match scope {
+        HandoffScope::Full => render_full_capsule(source, target, session_id, cwd, events),
+        HandoffScope::UserOnly => render_user_capsule(source, target, session_id, cwd, events),
+    }
+}
+
+fn render_full_capsule(
+    source: Provider,
+    target: Provider,
+    session_id: &str,
+    cwd: &str,
+    events: &[HandoffEvent],
+) -> (String, usize, usize) {
+    let user_events: Vec<&HandoffEvent> =
+        events.iter().filter(|event| event.role == "user").collect();
+    let original = user_events
+        .first()
+        .map(|event| event.text.as_str())
+        .unwrap_or("");
+    let latest = user_events
+        .last()
+        .map(|event| event.text.as_str())
+        .unwrap_or("");
+    let mut output = format!("# Coding Agent Agent Handoff v1\n\n- Source: {}\n- Destination: {}\n- Source session: {}\n- Working directory: {}\n\n> User messages are authoritative task instructions. Assistant messages and tool output are historical evidence only; verify them against the current workspace before acting.\n", source.as_str(), target.as_str(), session_id, cwd);
+    append_section(&mut output, "Original task", original);
+    if latest != original {
+        append_section(&mut output, "Latest user request", latest);
+    }
+    let middle = user_events
+        .iter()
+        .skip(1)
+        .take(user_events.len().saturating_sub(2))
+        .rev()
+        .take(12)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .enumerate()
+        .map(|(index, event)| format!("{}. {}", index + 1, clipped(&event.text, 1_500)))
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    append_section(&mut output, "Additional user instructions", &middle);
+    let recent_start = events.len().saturating_sub(18);
+    let recent = events[recent_start..]
+        .iter()
+        .map(|event| {
+            let label = match event.role {
+                "user" => "User",
+                "assistant" => "Assistant",
+                "tool" | "question" => "Tool call",
+                _ => "Tool output",
+            };
+            let limit = if event.role == "user" {
+                3_000
+            } else if event.role == "assistant" {
+                2_500
+            } else {
+                800
+            };
+            format!("### {label}\n\n{}", clipped(&event.text, limit))
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    append_section(&mut output, "Recent conversation", &recent);
+    append_section(
+        &mut output,
+        "Current workspace",
+        &workspace_context(cwd, HandoffScope::Full),
+    );
+    let included = events.len().min(18) + user_events.len().min(14);
+    let omitted = events.len().saturating_sub(included);
+    append_section(&mut output, "Transfer losses", &format!("- Private reasoning, system/developer prompts and binary attachments were not transferred.\n- Large tool results were clipped.\n- Approximate events omitted by the capsule budget: {omitted}.\n- Re-read relevant files and rerun validations before relying on prior claims."));
+    if output.chars().count() > DRAFT_CHAR_LIMIT {
+        output = output
+            .chars()
+            .take(DRAFT_CHAR_LIMIT.saturating_sub(80))
+            .collect();
+        output.push_str("\n\n[Capsule truncated at the Coding Agent safety limit.]\n");
+    }
+    (output, events.len().saturating_sub(omitted), omitted)
+}
+
+fn render_user_capsule(
+    source: Provider,
+    target: Provider,
+    session_id: &str,
+    cwd: &str,
+    events: &[HandoffEvent],
+) -> (String, usize, usize) {
+    let user_events: Vec<&HandoffEvent> =
+        events.iter().filter(|event| event.role == "user").collect();
+    let mut output = format!("# Coding Agent Agent Handoff v1\n\n- Source: {}\n- Destination: {}\n- Source session: {}\n- Working directory: {}\n\n> This capsule contains user-authored messages and non-content workspace metadata only. Re-read relevant files and rerun validations before acting.\n", source.as_str(), target.as_str(), session_id, cwd);
+    append_section(
+        &mut output,
+        "Current workspace",
+        &workspace_context(cwd, HandoffScope::UserOnly),
+    );
+    output.push_str("\n## User-authored messages\n");
+
+    let mut included = 0;
+    for (index, event) in user_events.iter().enumerate() {
+        let entry = format!(
+            "\n### User message {}\n\n{}\n",
+            index + 1,
+            event.text.trim()
+        );
+        if output.chars().count() + entry.chars().count() + 512 <= DRAFT_CHAR_LIMIT {
+            output.push_str(&entry);
+            included += 1;
+        }
+    }
+
+    let omitted = events.len().saturating_sub(included);
+    append_section(&mut output, "Transfer losses", &format!("- Events included: {included}.\n- Events omitted: {omitted}.\n- Assistant messages, tool calls, tool results, private reasoning, system/developer prompts, and binary attachments were not transferred.\n- User messages that exceeded the capsule budget were not transferred."));
+    (output, included, omitted)
+}
+
+fn handoff_title(events: &[HandoffEvent], source: Provider) -> (String, usize) {
+    let title = events
+        .iter()
+        .find(|event| event.role == "user")
+        .map(|event| clipped(&event.text.replace(['\r', '\n'], " "), 80))
+        .unwrap_or_else(|| format!("{} handoff", source.as_str()));
+    redact(title)
+}
+
+#[tauri::command]
+pub async fn prepare_agent_handoff(
+    source_provider: String,
+    target_provider: String,
+    source_session_id: Option<String>,
+    cwd: String,
+    scope: String,
+) -> Result<HandoffDraft, String> {
+    tokio::task::spawn_blocking(move || {
+        let scope = HandoffScope::parse(&scope);
+        let source = Provider::parse(&source_provider)?;
+        let target = Provider::parse(&target_provider)?;
+        if source == target {
+            return Err("handoff destination must be a different provider".to_string());
+        }
+        let (resolved_id, path, used_fallback) =
+            resolve_source_file(source, &cwd, source_session_id.as_deref())?;
+        let events = match source {
+            Provider::Claude => claude_events(&path, false)?,
+            Provider::Codex => codex_events(&path, false)?,
+        };
+        if !events.iter().any(|event| event.role == "user") {
+            return Err("the selected session has no transferable user messages".to_string());
+        }
+        let (title, title_redaction_count) = handoff_title(&events, source);
+        let (rendered, included_event_count, omitted_event_count) =
+            render_capsule(source, target, &resolved_id, &cwd, &events, scope);
+        let (content, content_redaction_count) = redact(rendered);
+        Ok(HandoffDraft {
+            source_provider: source.as_str().to_string(),
+            target_provider: target.as_str().to_string(),
+            source_session_id: resolved_id,
+            cwd,
+            title,
+            content,
+            included_event_count,
+            omitted_event_count,
+            redaction_count: title_redaction_count + content_redaction_count,
+            used_fallback,
+        })
+    })
+    .await
+    .map_err(|error| format!("prepare_agent_handoff task failed: {error}"))?
+}
+
+fn validate_handoff_id(value: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.len() > 64
+        || !value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '-' || character == '_'
+        })
+    {
+        return Err("invalid handoff id".to_string());
+    }
+    Ok(())
+}
+
+fn finalize_materialized_content(content: &str) -> Result<String, String> {
+    if content.trim().is_empty() {
+        return Err("handoff content is empty".to_string());
+    }
+    if content.len() > MATERIALIZED_BYTE_LIMIT {
+        return Err(format!(
+            "handoff content exceeds {MATERIALIZED_BYTE_LIMIT} bytes"
+        ));
+    }
+    Ok(redact(content.to_string()).0)
+}
+
+fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(path)
+}
+
+fn create_private_file(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(content)?;
+    file.sync_all()
+}
+
+fn materialize_in_root(
+    root: &Path,
+    content: &str,
+    mut next_id: impl FnMut() -> String,
+) -> Result<HandoffArtifact, String> {
+    let content = finalize_materialized_content(content)?;
+    fs::create_dir_all(root).map_err(|error| error.to_string())?;
+
+    for _ in 0..HANDOFF_ID_ATTEMPTS {
+        let handoff_id = next_id();
+        validate_handoff_id(&handoff_id)?;
+        let context_dir = root.join(&handoff_id);
+        match create_private_dir(&context_dir) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.to_string()),
+        }
+
+        let context_path = context_dir.join("context.md");
+        if let Err(error) = create_private_file(&context_path, content.as_bytes()) {
+            let _ = fs::remove_dir_all(&context_dir);
+            return Err(error.to_string());
+        }
+        return Ok(HandoffArtifact {
+            handoff_id,
+            context_dir: context_dir.to_string_lossy().to_string(),
+            context_path: context_path.to_string_lossy().to_string(),
+        });
+    }
+
+    Err("could not allocate a unique handoff id".to_string())
+}
+
+#[tauri::command]
+pub async fn materialize_agent_handoff(
+    app: AppHandle,
+    content: String,
+) -> Result<HandoffArtifact, String> {
+    let root = crate::paths::profile_data_dir(&app)?.join("handoffs");
+    tokio::task::spawn_blocking(move || {
+        materialize_in_root(&root, &content, || nanoid::nanoid!(16))
+    })
+    .await
+    .map_err(|error| format!("materialize_agent_handoff task failed: {error}"))?
+}
+
+#[tauri::command]
+pub async fn complete_agent_handoff(app: AppHandle, handoff_id: String) -> Result<(), String> {
+    validate_handoff_id(&handoff_id)?;
+    let root = crate::paths::profile_data_dir(&app)?.join("handoffs");
+    let target = root.join(&handoff_id);
+    tokio::task::spawn_blocking(move || {
+        if !target.exists() {
+            return Ok(());
+        }
+        let canonical_root = fs::canonicalize(&root).map_err(|error| error.to_string())?;
+        let canonical_target = fs::canonicalize(&target).map_err(|error| error.to_string())?;
+        if canonical_target.parent() != Some(canonical_root.as_path()) || !canonical_target.is_dir()
+        {
+            return Err("handoff cleanup target is outside the handoff directory".to_string());
+        }
+        fs::remove_dir_all(canonical_target).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("complete_agent_handoff task failed: {error}"))?
+}
+
+// A packet written moments ago may belong to a pane that projects.json does not list yet.
+const ORPHAN_HANDOFF_MIN_AGE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+fn prune_in_root(root: &Path, keep: &[String], min_age: std::time::Duration) -> usize {
+    let Ok(entries) = fs::read_dir(root) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if validate_handoff_id(&name).is_err() || keep.contains(&name) {
+            continue;
+        }
+        let Ok(metadata) = fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        let old_enough = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age >= min_age);
+        if metadata.is_dir() && old_enough && fs::remove_dir_all(entry.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+#[tauri::command]
+pub async fn prune_agent_handoffs(app: AppHandle, keep: Vec<String>) -> Result<(), String> {
+    let root = crate::paths::profile_data_dir(&app)?.join("handoffs");
+    tokio::task::spawn_blocking(move || {
+        prune_in_root(&root, &keep, ORPHAN_HANDOFF_MIN_AGE);
+    })
+    .await
+    .map_err(|error| format!("prune_agent_handoffs task failed: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pruning_keeps_live_packets_and_removes_orphans() {
+        let root =
+            std::env::temp_dir().join(format!("coding-agent-handoff-prune-{}", nanoid::nanoid!(8)));
+        for id in ["liveHandoff00001", "orphanHandoff001"] {
+            fs::create_dir_all(root.join(id)).expect("create packet");
+            fs::write(root.join(id).join("context.md"), "context").expect("write packet");
+        }
+        fs::write(root.join("notes.txt"), "not a packet").expect("write stray file");
+
+        let keep = vec!["liveHandoff00001".to_string()];
+        assert_eq!(
+            prune_in_root(&root, &keep, std::time::Duration::from_secs(3600)),
+            0
+        );
+        assert_eq!(prune_in_root(&root, &keep, std::time::Duration::ZERO), 1);
+
+        assert!(root.join("liveHandoff00001").join("context.md").is_file());
+        assert!(!root.join("orphanHandoff001").exists());
+        assert!(root.join("notes.txt").is_file());
+        fs::remove_dir_all(root).expect("remove test directory");
+    }
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn redacts_common_secrets() {
+        let input = "Authorization: Bearer abcdefgh\nOPENAI_API_KEY=sk-proj-abcdefghijklmnop\n";
+        let (output, count) = redact(input.to_string());
+        assert!(count >= 2);
+        assert!(!output.contains("abcdefghijklmnop"));
+        assert!(output.contains("[REDACTED]"));
+    }
+
+    fn event(role: &'static str, text: &str) -> HandoffEvent {
+        HandoffEvent {
+            role,
+            text: text.into(),
+            question_set_id: None,
+            questions: None,
+            tool: None,
+        }
+    }
+
+    fn mixed_events() -> Vec<HandoffEvent> {
+        vec![
+            event("user", "Build the feature"),
+            event("assistant", "assistant-only-confidential-content"),
+            event("tool", "tool-argument-confidential-content"),
+            event("tool-result", "tool-result-confidential-content"),
+            event("user", "Keep the old terminal open"),
+        ]
+    }
+
+    #[test]
+    fn only_the_exact_full_name_selects_the_full_scope() {
+        assert_eq!(HandoffScope::parse("full"), HandoffScope::Full);
+        assert_eq!(HandoffScope::parse("user-only"), HandoffScope::UserOnly);
+        assert_eq!(HandoffScope::parse(""), HandoffScope::UserOnly);
+        assert_eq!(HandoffScope::parse("Full"), HandoffScope::UserOnly);
+        assert_eq!(HandoffScope::parse(" full "), HandoffScope::UserOnly);
+        assert_eq!(HandoffScope::parse("everything"), HandoffScope::UserOnly);
+    }
+
+    #[test]
+    fn user_only_capsule_includes_only_user_messages_and_counts_omissions() {
+        let events = mixed_events();
+        let (capsule, included, omitted) = render_capsule(
+            Provider::Claude,
+            Provider::Codex,
+            "session-1",
+            "C:\\repo",
+            &events,
+            HandoffScope::UserOnly,
+        );
+        assert!(capsule.contains("Build the feature"));
+        assert!(capsule.contains("Keep the old terminal open"));
+        assert!(!capsule.contains("assistant-only-confidential-content"));
+        assert!(!capsule.contains("tool-argument-confidential-content"));
+        assert!(!capsule.contains("tool-result-confidential-content"));
+        assert_eq!(included, 2);
+        assert_eq!(omitted, 3);
+        assert!(capsule.contains("Events included: 2"));
+        assert!(capsule.contains("Events omitted: 3"));
+    }
+
+    #[test]
+    fn full_capsule_keeps_assistant_and_tool_activity() {
+        let events = mixed_events();
+        let (capsule, included, omitted) = render_capsule(
+            Provider::Claude,
+            Provider::Codex,
+            "session-1",
+            "C:\\repo",
+            &events,
+            HandoffScope::Full,
+        );
+        assert!(capsule.contains("Build the feature"));
+        assert!(capsule.contains("Keep the old terminal open"));
+        assert!(capsule.contains("assistant-only-confidential-content"));
+        assert!(capsule.contains("tool-argument-confidential-content"));
+        assert!(capsule.contains("tool-result-confidential-content"));
+        assert!(capsule.contains("Private reasoning"));
+        assert_eq!(included, 5);
+        assert_eq!(omitted, 0);
+    }
+
+    #[test]
+    fn only_the_full_scope_names_changed_files() {
+        let root = std::env::temp_dir().join(format!(
+            "coding-agent-handoff-workspace-test-{}",
+            nanoid::nanoid!(8)
+        ));
+        fs::create_dir_all(&root).expect("create repository directory");
+        let cwd = root.to_string_lossy().to_string();
+        let initialized = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&cwd)
+            .args(["init", "--quiet"])
+            .status()
+            .expect("run git init");
+        assert!(initialized.success());
+        fs::write(root.join("confidential-file-name.txt"), "body").expect("write untracked file");
+
+        let full = workspace_context(&cwd, HandoffScope::Full);
+        let user_only = workspace_context(&cwd, HandoffScope::UserOnly);
+        fs::remove_dir_all(&root).expect("remove repository directory");
+
+        assert!(full.contains("confidential-file-name.txt"));
+        assert!(!user_only.contains("confidential-file-name.txt"));
+        assert!(user_only.contains("Changed working-tree entries: 1"));
+    }
+
+    #[test]
+    fn redacts_generated_title() {
+        let events = vec![event(
+            "user",
+            "Implement this TOKEN=definitely-fake-title-secret safely",
+        )];
+        let (title, count) = handoff_title(&events, Provider::Claude);
+        assert_eq!(count, 1);
+        assert!(title.contains("[REDACTED]"));
+        assert!(!title.contains("definitely-fake-title-secret"));
+    }
+
+    #[test]
+    fn final_materialization_redacts_renderer_edits() {
+        let content = "Edited packet TOKEN=definitely-fake-renderer-secret";
+        let finalized = finalize_materialized_content(content).expect("content should be accepted");
+        assert!(finalized.contains("[REDACTED]"));
+        assert!(!finalized.contains("definitely-fake-renderer-secret"));
+    }
+
+    #[test]
+    fn materialization_retries_collisions_without_overwrite() {
+        let root = std::env::temp_dir().join(format!(
+            "coding-agent-handoff-materialize-test-{}",
+            nanoid::nanoid!(8)
+        ));
+        let collision_dir = root.join("collision");
+        fs::create_dir_all(&collision_dir).expect("create collision directory");
+        let marker = collision_dir.join("context.md");
+        fs::write(&marker, "existing").expect("write collision marker");
+        let mut ids = ["collision", "fresh"].into_iter();
+
+        let artifact = materialize_in_root(&root, "safe content", || {
+            ids.next().expect("an id should be available").to_string()
+        })
+        .expect("materialization should retry");
+
+        assert_eq!(artifact.handoff_id, "fresh");
+        assert_eq!(fs::read_to_string(&marker).unwrap(), "existing");
+        assert_eq!(
+            fs::read_to_string(&artifact.context_path).unwrap(),
+            "safe content"
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let dir_mode = fs::metadata(&artifact.context_dir)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            let file_mode = fs::metadata(&artifact.context_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(dir_mode, 0o700);
+            assert_eq!(file_mode, 0o600);
+        }
+
+        fs::remove_dir_all(root).expect("remove test directory");
+    }
+
+    #[test]
+    fn rejects_unsafe_cleanup_ids() {
+        assert!(validate_handoff_id("safe_123-id").is_ok());
+        assert!(validate_handoff_id("../outside").is_err());
+        assert!(validate_handoff_id("").is_err());
+    }
+
+    #[test]
+    fn parses_codex_and_claude_questions() {
+        let codex = remote_questions(
+            "request_user_input",
+            &Value::String(
+                r#"{"questions":[{"id":"scope","header":"Scope","question":"Which scope?","options":[{"label":"Focused","description":"Only Codex and Claude"}]}]}"#.into(),
+            ),
+        )
+        .expect("Codex question");
+        assert_eq!(codex[0].id, "scope");
+        assert!(!codex[0].multi_select);
+
+        let claude = remote_questions(
+            "AskUserQuestion",
+            &serde_json::json!({
+                "questions": [{
+                    "header": "Files",
+                    "question": "Which files?",
+                    "multiSelect": true,
+                    "options": [
+                        { "label": "Source", "description": "Application code" },
+                        { "label": "Tests", "description": "Test code" }
+                    ]
+                }]
+            }),
+        )
+        .expect("Claude question");
+        assert!(claude[0].multi_select);
+        assert_eq!(claude[0].options.len(), 2);
+    }
+
+    #[test]
+    fn preserves_agent_call_ids_for_remote_questions() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let root = std::env::temp_dir();
+        let codex_path = root.join(format!("coding-agent-codex-question-{suffix}.jsonl"));
+        let claude_path = root.join(format!("coding-agent-claude-question-{suffix}.jsonl"));
+        fs::write(
+            &codex_path,
+            r#"{"type":"response_item","payload":{"type":"function_call","name":"request_user_input","call_id":"call-codex-42","arguments":"{\"questions\":[{\"id\":\"scope\",\"header\":\"Scope\",\"question\":\"Which scope?\",\"options\":[{\"label\":\"Focused\",\"description\":\"Only this area\"}]}]}"}}"#,
+        )
+        .expect("write Codex fixture");
+        fs::write(
+            &claude_path,
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu-claude-42","name":"AskUserQuestion","input":{"questions":[{"header":"Scope","question":"Which scope?","multiSelect":false,"options":[{"label":"Focused","description":"Only this area"}]}]}}]}}"#,
+        )
+        .expect("write Claude fixture");
+
+        let codex = codex_events(&codex_path, false).expect("parse Codex fixture");
+        let claude = claude_events(&claude_path, false).expect("parse Claude fixture");
+        fs::remove_file(codex_path).expect("remove Codex fixture");
+        fs::remove_file(claude_path).expect("remove Claude fixture");
+
+        assert_eq!(codex[0].question_set_id.as_deref(), Some("call-codex-42"));
+        assert_eq!(
+            claude[0].question_set_id.as_deref(),
+            Some("toolu-claude-42")
+        );
+    }
+
+    fn fixture(name: &str, lines: &[&str]) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("coding-agent-{name}-{suffix}.jsonl"));
+        fs::write(&path, lines.join("\n")).expect("write fixture");
+        path
+    }
+
+    #[test]
+    fn reads_claude_thinking_only_for_the_narrator() {
+        let path = fixture(
+            "claude-thinking",
+            &[
+                r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"The test fails on auth.","signature":"x"},{"type":"text","text":"Running the tests."},{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"npm test","description":"Run the tests"}}]}}"#,
+                r#"{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"","signature":"y"},{"type":"redacted_thinking","data":"z"}]}}"#,
+            ],
+        );
+        let narrated = claude_events(&path, true).expect("parse with reasoning");
+        let handed_off = claude_events(&path, false).expect("parse without reasoning");
+        fs::remove_file(path).expect("remove fixture");
+
+        let roles: Vec<&str> = narrated.iter().map(|event| event.role).collect();
+        assert_eq!(roles, ["thinking", "assistant", "tool"]);
+        assert_eq!(narrated[0].text, "The test fails on auth.");
+        assert_eq!(
+            narrated[2].tool,
+            Some(ToolSummary {
+                name: "Bash".into(),
+                command: Some("npm test".into()),
+                path: None,
+                description: Some("Run the tests".into()),
+            })
+        );
+        assert!(handed_off.iter().all(|event| event.role != "thinking"));
+        assert_eq!(handed_off.len(), 2);
+    }
+
+    #[test]
+    fn reads_codex_reasoning_summaries_and_tool_calls() {
+        let path = fixture(
+            "codex-reasoning",
+            &[
+                r#"{"type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"**Checking the build**"}],"content":null,"encrypted_content":"abc"}}"#,
+                r#"{"type":"response_item","payload":{"type":"reasoning","summary":[],"encrypted_content":"def"}}"#,
+                r#"{"type":"response_item","payload":{"type":"function_call","name":"shell","call_id":"c1","arguments":"{\"command\":[\"bash\",\"-lc\",\"cargo test\"],\"workdir\":\"/w\"}"}}"#,
+                r#"{"type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","call_id":"c2","input":"*** Begin Patch\n*** Update File: src/auth.ts\n@@\n-a\n+b\n*** End Patch"}}"#,
+                r#"{"type":"response_item","payload":{"type":"function_call","name":"exec_command","call_id":"c3","arguments":"{\"cmd\":\"ls -la\"}"}}"#,
+            ],
+        );
+        let narrated = codex_events(&path, true).expect("parse with reasoning");
+        let handed_off = codex_events(&path, false).expect("parse without reasoning");
+        fs::remove_file(path).expect("remove fixture");
+
+        let roles: Vec<&str> = narrated.iter().map(|event| event.role).collect();
+        assert_eq!(roles, ["thinking", "tool", "tool", "tool"]);
+        assert_eq!(narrated[0].text, "**Checking the build**");
+        let tool = |index: usize| narrated[index].tool.clone().expect("tool summary");
+        assert_eq!(tool(1).name, "shell");
+        assert_eq!(tool(1).command.as_deref(), Some("cargo test"));
+        assert_eq!(tool(2).name, "apply_patch");
+        assert_eq!(tool(2).path.as_deref(), Some("src/auth.ts"));
+        assert_eq!(tool(3).command.as_deref(), Some("ls -la"));
+        assert_eq!(handed_off.len(), 3);
+        assert!(handed_off.iter().all(|event| event.role != "thinking"));
+    }
+
+    #[test]
+    fn summarizes_tool_inputs_but_not_questions() {
+        let summary = tool_summary("Edit", &serde_json::json!({ "file_path": "/a/b.ts" }));
+        assert_eq!(summary.path.as_deref(), Some("/a/b.ts"));
+        assert_eq!(summary.command, None);
+        let path = fixture(
+            "claude-question-tool",
+            &[
+                r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"q","name":"AskUserQuestion","input":{"questions":[{"header":"Scope","question":"Which scope?","options":[{"label":"Focused"}]}]}}]}}"#,
+            ],
+        );
+        let events = claude_events(&path, true).expect("parse question");
+        fs::remove_file(path).expect("remove fixture");
+        assert_eq!(events[0].role, "question");
+        assert!(events[0].tool.is_none());
+    }
+}
+
+#[cfg(test)]
+mod session_scope_tests {
+    use super::*;
+    use crate::provider_common::provider_scope_from;
+
+    fn windows_scope(cwd: &str) -> ProviderScope {
+        provider_scope_from(
+            cwd,
+            Some(Path::new(r"C:\Users\dev")),
+            None,
+            None,
+            &[".codex", "sessions"],
+        )
+        .expect("a windows cwd with a windows home resolves")
+    }
+
+    #[test]
+    fn a_windows_cwd_matches_a_session_recorded_with_another_case_or_slashes() {
+        let scope = windows_scope(r"C:\projects\acme");
+        if cfg!(windows) {
+            assert!(session_matches_scope(&scope, r"C:/Projects/Acme"));
+        }
+        assert!(session_matches_scope(&scope, r"C:\projects\acme"));
+        assert!(!session_matches_scope(&scope, r"C:\projects\other"));
+    }
+
+    #[test]
+    fn a_guest_cwd_matches_only_the_exact_guest_path_the_agent_recorded() {
+        let scope = provider_scope_from(
+            r"\\wsl.localhost\Ubuntu\home\dev\projects\app",
+            Some(Path::new(r"C:\Users\dev")),
+            Some(Path::new(r"\\wsl.localhost\Ubuntu\home\dev")),
+            Some("/home/dev/projects/app"),
+            &[".codex", "sessions"],
+        )
+        .expect("a wsl cwd with a resolved distro home resolves");
+
+        assert!(session_matches_scope(&scope, "/home/dev/projects/app"));
+        assert!(!session_matches_scope(&scope, "/home/dev/projects/App"));
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tail_tests {
+    use super::tail;
+
+    #[test]
+    fn a_short_list_starts_at_zero() {
+        assert_eq!(tail(vec![1, 2, 3], 5), (0, vec![1, 2, 3]));
+    }
+
+    // The voice narrator counts events by absolute position, so dropping the head must say how
+    // many were dropped.
+    #[test]
+    fn a_long_list_keeps_its_tail_and_reports_where_it_starts() {
+        assert_eq!(tail(vec![1, 2, 3, 4, 5], 2), (3, vec![4, 5]));
+    }
+}

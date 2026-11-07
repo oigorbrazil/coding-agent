@@ -1,0 +1,18 @@
+{
+  "name": "Coding Agent Remote",
+  "short_name": "Coding Agent",
+  "description": "Coding Agent LAN remote workspace",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0c0c0c",
+  "theme_color": "#0c0c0c",
+  "icons": [
+    {
+      "src": "/brand-icon.png",
+      "sizes": "220x220",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}
