@@ -36,7 +36,7 @@ Mac synced through: `v1.7.0` (`80e44a3`)
 
 ## Unreleased
 
-- `pending` · `ui` · feat: second brain panel in Preferences and Save to second brain on settled board runs
+- `pending` · `ui` · `21fc57f` feat: second brain panel and Save to second brain on the board
   - Files: `src-tauri/src/second_brain.rs`, `src/components/modals/preferences/SecondBrainPanel.tsx`, `src/lib/orchestratorRunNote.ts`
   - Contract: new notes are Markdown files with the Coding Opus frontmatter (`id`, `title`, `area`, `type`, `tags`, `status`, `created`, `updated`) under `<Documents>/second brain` or `CODING_OPUS_BRAIN`; existing notes are never edited.
 - `skip` · `contract` · feat: expose typed plugin voice API with core-managed provider keys
