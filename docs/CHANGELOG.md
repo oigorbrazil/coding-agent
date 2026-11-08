@@ -13,6 +13,10 @@ Notable user-facing changes to **Coding Agent** are documented here. The format 
 
 ## [Unreleased]
 
+- Second brain in the app: Preferences ▸ Features shows the global `second brain` folder the Coding Opus skill uses, with its note count and the latest notes.
+- Orchestration board: every settled run has **Save to second brain**, which writes its workers, results, tokens and cost as a new note under `30-Projetos/<project>` without touching existing notes.
+- Coding Opus skill 27: the separate plugin packaging is gone; the skill ships through Coding Agent.
+
 ## [1.7.1] — 2026-11-07
 
 - Coding Opus skill 26: inside Coding Agent, the skill keeps memory, playbook choice, escalation and the cost report, and runs its workers through the orchestration board (`coding_agent_delegate`) instead of its own runner. It checks quotas before delegating, always passes the working directory and treats an empty "succeeded" as a failure.

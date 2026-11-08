@@ -4,7 +4,7 @@ description: Coding Opus melhora a performance e a economia da IA com dois pilar
 argument-hint: "[tarefa] | install | onde | consultar <termos> | registrar [título] | on | off | passive | spend | save | max | freestyle | careful | report | status | usage | models | editor | list | stop | clean | skip <fase> | switch <playbook> | freeform | budget <limite> | mark <worker> <used|partial|discarded> | setup | help"
 license: MIT
 metadata:
-  version: "26"
+  version: "27"
   codingOpus: "1"
   upstream: "Kc1t/alethe-orchestrate-skill@ab81104 + n1systempc/obsidian-second-brain@4f43c49"
 ---
@@ -124,11 +124,11 @@ A escrita depende do ok do usuário ou de uma regra permanente dele, como
 3. Para atualizar uma nota existente, releia-a, preserve campos e links, atualize `updated` e
    confirme a gravação.
 
-## Hook passivo
+## Modo passivo sem hook
 
-O hook (`scripts/hook.py`) só roda quando a skill é instalada como plugin, com o `hooks.json` do
-repositório. Instalada como skill comum, rode `orchestrate.py mode show` no início da sessão e
-depois de uma compactação.
+A skill é distribuída pelo Coding Agent, sem o hook de plugin. Rode `orchestrate.py mode show` no
+início da sessão e depois de uma compactação para saber se há um modo ligado neste projeto.
+`scripts/hook.py` continua disponível para quem registrar o hook à mão.
 
 ## Segurança
 

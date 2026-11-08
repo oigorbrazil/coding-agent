@@ -27,6 +27,7 @@ mod crash_watch;
 mod cursor_sessions;
 mod custom_agent_icons;
 mod diagnostics;
+mod second_brain;
 mod discord_presence;
 mod economy_agents;
 mod event_bus;
@@ -549,6 +550,8 @@ pub fn run() {
             git_control::git_incoming_outgoing,
             git_control::git_remote_origin,
             diagnostics::open_data_folder,
+            second_brain::second_brain_status,
+            second_brain::second_brain_record,
             diagnostics::open_spawn_log,
             diagnostics::open_in_file_explorer,
             diagnostics::open_in_vscode,

@@ -3,6 +3,7 @@ import { useProjectsStore } from '../../../stores/projectsStore'
 import { useUiStore } from '../../../stores/uiStore'
 import controls from '../controls.module.css'
 import { FeaturesStep } from '../onboarding/FeaturesStep'
+import { SecondBrainPanel } from './SecondBrainPanel'
 
 export function FeaturesPage() {
   const t = useT()
@@ -11,6 +12,7 @@ export function FeaturesPage() {
   return (
     <div id="optional-features">
       <FeaturesStep expandSecondaryByDefault showPlaywrightAdvanced showAiMemoryPanel />
+      <SecondBrainPanel />
       {preferences.enabledFeatures.mcp ? (
         <button
           type="button"

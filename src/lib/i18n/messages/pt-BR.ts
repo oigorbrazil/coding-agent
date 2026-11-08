@@ -722,6 +722,24 @@ export const ptBR: Record<MessageKey, string> = {
   'aiMemory.installing': 'Instalando…',
   'aiMemory.installedManaged': 'Instalado pelo Coding Agent',
   'aiMemory.installedExternal': 'Usando a cópia que você instalou',
+  'secondBrain.title': 'Second brain',
+  'secondBrain.description':
+    'Notas em Markdown, globais, que a skill Coding Opus consulta antes de planejar e registra depois de uma orquestração, compartilhadas entre todos os projetos.',
+  'secondBrain.checking': 'Verificando…',
+  'secondBrain.found': '{count} notas em {path}',
+  'secondBrain.missing':
+    'Ainda não foi criado. Rode /coding install no Claude Code ou no Codex para criá-lo em {path}.',
+  'secondBrain.fromEnv': 'Pasta escolhida pela variável de ambiente CODING_OPUS_BRAIN.',
+  'secondBrain.error': 'Não foi possível ler a pasta do second brain.',
+  'secondBrain.recent': 'Alteradas recentemente',
+  'secondBrain.open': 'Abrir pasta',
+  'secondBrain.refresh': 'Atualizar',
+  'orchestrator.recordRun': 'Salvar no second brain',
+  'orchestrator.recordRunTitle':
+    'Grava os workers, resultados, tokens e custo deste lote como uma nota nova no second brain',
+  'orchestrator.recordedRun': 'Salvo no second brain',
+  'orchestrator.recordRunFailed': 'Não foi possível salvar no second brain',
+  'orchestrator.recordOpenFolder': 'Abrir pasta',
   'aiMemory.at': 'em {path}',
   'aiMemory.missing': 'Ainda não instalado — instale e os agentes já podem usar.',
   'aiMemory.unsupported':

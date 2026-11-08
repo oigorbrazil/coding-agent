@@ -710,6 +710,24 @@ export const en = {
   'aiMemory.installing': 'Installing…',
   'aiMemory.installedManaged': 'Installed by Coding Agent',
   'aiMemory.installedExternal': 'Using the copy you installed',
+  'secondBrain.title': 'Second brain',
+  'secondBrain.description':
+    'Global Markdown notes the Coding Opus skill reads before planning and writes after a run, shared by every project.',
+  'secondBrain.checking': 'Checking…',
+  'secondBrain.found': '{count} notes in {path}',
+  'secondBrain.missing':
+    'Not created yet. Run /coding install in Claude Code or Codex to create it in {path}.',
+  'secondBrain.fromEnv': 'Folder chosen by the CODING_OPUS_BRAIN environment variable.',
+  'secondBrain.error': 'Could not read the second brain folder.',
+  'secondBrain.recent': 'Recently changed',
+  'secondBrain.open': 'Open folder',
+  'secondBrain.refresh': 'Refresh',
+  'orchestrator.recordRun': 'Save to second brain',
+  'orchestrator.recordRunTitle':
+    "Write this run's workers, results, tokens and cost as a new note in the second brain",
+  'orchestrator.recordedRun': 'Saved to the second brain',
+  'orchestrator.recordRunFailed': 'Could not save to the second brain',
+  'orchestrator.recordOpenFolder': 'Open folder',
   'aiMemory.at': 'at {path}',
   'aiMemory.missing': 'Not installed yet — install it and the agents can start using it.',
   'aiMemory.unsupported':

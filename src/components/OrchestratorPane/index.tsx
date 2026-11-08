@@ -2,6 +2,7 @@ import { convertFileSrc } from '@tauri-apps/api/core'
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow'
 import {
   AppWindow,
+  BookmarkPlus,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
@@ -38,15 +39,16 @@ import {
   fitView,
   focusView,
   type GraphNode,
-  type LayoutShell,
   layoutPlannerBoard,
+  type LayoutShell,
   mediaNodeId,
   type NodeHeights,
   rootNodeId,
   type ViewTransform,
   zoomAt,
 } from '../../lib/orchestratorGraph'
-import { extractMediaItems, splitPromotedMedia, type MediaItem } from '../../lib/orchestratorMedia'
+import { extractMediaItems, type MediaItem, splitPromotedMedia } from '../../lib/orchestratorMedia'
+import { isRunSettled, runNote } from '../../lib/orchestratorRunNote'
 import {
   aggregateAgentSpend,
   type Attention,
@@ -61,13 +63,21 @@ import {
   RUN_LANE_ORDER,
   type RunLane,
 } from '../../lib/orchestratorRuns'
-import { resolveShortcuts, renderShortcut, shortcutsForJob } from '../../lib/orchestratorShortcuts'
+import {
+  plannerTabActivity,
+  type ShellAttachment,
+  type ShellControl,
+  shellsForBoard,
+  shellTerminalPlan,
+} from '../../lib/orchestratorShells'
+import { renderShortcut, resolveShortcuts, shortcutsForJob } from '../../lib/orchestratorShortcuts'
 import { nativeSubagentJobs } from '../../lib/orchestratorSubagents'
 import { shouldAutoFit } from '../../lib/orchestratorViewPolicy'
 import { workerSettingDisplay } from '../../lib/orchestratorWorkerDisplay'
 import { basename } from '../../lib/paths'
 import {
   listenOrchestratorJobs,
+  openInFileExplorer,
   openOrchestrationWindow,
   orchestratorAnswer,
   orchestratorCancelJob,
@@ -76,20 +86,14 @@ import {
   orchestratorJobDiff,
   orchestratorJobs,
   type OrchestratorPendingApproval,
+  orchestratorRestart,
+  type OrchestratorShell,
   orchestratorShellRemove,
   orchestratorShellRestart,
   orchestratorShellStop,
-  type OrchestratorShell,
-  orchestratorRestart,
   type OrchestratorSnapshot,
+  secondBrainRecord,
 } from '../../lib/tauri'
-import {
-  plannerTabActivity,
-  type ShellAttachment,
-  type ShellControl,
-  shellsForBoard,
-  shellTerminalPlan,
-} from '../../lib/orchestratorShells'
 import type { OrchestratorShortcut, Project, Terminal, Theme } from '../../lib/types'
 import { useAgentCanvasStore } from '../../stores/agentCanvasStore'
 import { useNodeCostStore } from '../../stores/nodeCostStore'
@@ -100,9 +104,9 @@ import { Modal } from '../modals/Modal'
 import { Collapse } from '../ui/Collapse'
 import { writePtyChunked } from '../XTermView/terminalWrite'
 import { AgentGlyph, contextShare, formatElapsed, formatTokens, statusTitle } from './nodeFormat'
-import { OrchestratorInspector, type InspectorTarget } from './OrchestratorInspector'
-import { ShellNode } from './ShellNode'
+import { type InspectorTarget, OrchestratorInspector } from './OrchestratorInspector'
 import styles from './OrchestratorPane.module.css'
+import { ShellNode } from './ShellNode'
 import { WorkerContextMenu } from './WorkerContextMenu'
 
 const EMPTY: OrchestratorSnapshot = {
@@ -520,11 +524,14 @@ type RunNodeProps = {
   run: OrchestratorRun
   node: GraphNode
   onClear: () => void
+  /** Null until every worker in the run has settled. */
+  onRecord: (() => void) | null
+  recorded: boolean
   bind: BindNode
   t: TFunction
 }
 
-function RunNode({ run, node, onClear, bind, t }: RunNodeProps) {
+function RunNode({ run, node, onClear, onRecord, recorded, bind, t }: RunNodeProps) {
   const total = run.jobs.length
 
   return (
@@ -560,6 +567,19 @@ function RunNode({ run, node, onClear, bind, t }: RunNodeProps) {
           <b>{t('orchestrator.runDone', { done: run.counts.finished, total })}</b>
         </span>
       </button>
+      {onRecord ? (
+        <button
+          type="button"
+          className={styles.runRecord}
+          disabled={recorded}
+          title={t('orchestrator.recordRunTitle')}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={onRecord}
+        >
+          <BookmarkPlus size={12} aria-hidden />
+          <span>{recorded ? t('orchestrator.recordedRun') : t('orchestrator.recordRun')}</span>
+        </button>
+      ) : null}
     </article>
   )
 }
@@ -825,6 +845,32 @@ export const OrchestratorPane = memo(function OrchestratorPane({
   const setActiveTab = useProjectsStore((state) => state.setActiveTab)
   const pushToast = useUiStore((state) => state.pushToast)
   const openModal = useUiStore((state) => state.openModal_)
+  const [recordedRuns, setRecordedRuns] = useState<ReadonlySet<string>>(() => new Set())
+  const recordRun = useCallback(
+    async (run: OrchestratorRun) => {
+      try {
+        const path = await secondBrainRecord(runNote(run))
+        setRecordedRuns((current) => new Set(current).add(run.id))
+        const folder = path.slice(0, Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')))
+        pushToast({
+          title: t('orchestrator.recordedRun'),
+          body: path,
+          actions: [
+            {
+              label: t('orchestrator.recordOpenFolder'),
+              run: () => void openInFileExplorer(folder),
+            },
+          ],
+        })
+      } catch (error) {
+        pushToast({
+          title: t('orchestrator.recordRunFailed'),
+          body: error instanceof Error ? error.message : String(error),
+        })
+      }
+    },
+    [pushToast, t],
+  )
   const setActiveTerminal = useUiStore((state) => state.setActiveTerminal)
   const setActiveView = useUiStore((state) => state.setActiveView)
   const requestPaneFocus = useUiStore((state) => state.requestPaneFocus)
@@ -1641,6 +1687,10 @@ export const OrchestratorPane = memo(function OrchestratorPane({
                         run={runs[index]}
                         node={node}
                         onClear={() => setInspecting(null)}
+                        onRecord={
+                          isRunSettled(runs[index]) ? () => void recordRun(runs[index]) : null
+                        }
+                        recorded={recordedRuns.has(runs[index].id)}
                         bind={bind}
                         t={t}
                       />
