@@ -14,13 +14,13 @@ use crate::cli_resolver;
 use crate::orchestrator_core::{Core, Launcher, OrchestrationSettings, Planner};
 
 const JOBS_EVENT: &str = "orchestrator://jobs";
-// The skill reads these names (`default_policy_path` in its orchestrate.py); keep them in step.
+// The skill's playbook.py finds the playbooks next to this policy path (`default_policy_path`).
 #[cfg(windows)]
 const SKILL_POLICY_FILE: &str = "coding-opus-orchestrate.json";
 #[cfg(not(windows))]
 const SKILL_POLICY_FILE: &str = "orchestrate.json";
 const SKILL_POLICY_ENV: &str = "CODING_OPUS_POLICY";
-// `user_playbooks_path` in the skill's orchestrate.py reads the same name and variable.
+// `user_playbooks_path` in the skill's playbook.py reads the same name and variable.
 const SKILL_PLAYBOOKS_FILE: &str = "coding-opus-playbooks.yaml";
 const SKILL_PLAYBOOKS_ENV: &str = "CODING_OPUS_PLAYBOOKS";
 const BUNDLED_PLAYBOOKS: &str = include_str!("../assets/skills/coding/playbooks.yaml");
@@ -122,7 +122,8 @@ pub fn orchestrator_mcp_config_path(
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
-    let path = std::env::temp_dir().join(format!("coding-agent-orchestrator-mcp-{port}-{safe}.json"));
+    let path =
+        std::env::temp_dir().join(format!("coding-agent-orchestrator-mcp-{port}-{safe}.json"));
     let body = serde_json::to_string_pretty(&config).map_err(|error| error.to_string())?;
     std::fs::write(&path, body).map_err(|error| format!("write_failed:{error}"))?;
     Ok(path.to_string_lossy().into_owned())
@@ -174,118 +175,12 @@ fn skill_policy_path() -> Result<PathBuf, String> {
     Ok(base.join(SKILL_POLICY_FILE))
 }
 
-const SKILL_PROVIDERS: [&str; 4] = ["codex", "claude", "agy", "kimi"];
-
-// The skill's `policy set` writes this file too, so keys the app does not show must survive.
-fn skill_policy_value(settings: &OrchestrationSettings, saved: &Value) -> Value {
-    let mut provider_order: Vec<&str> = Vec::new();
-    for provider in saved
-        .get("providerOrder")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-    {
-        if SKILL_PROVIDERS.contains(&provider) && !provider_order.contains(&provider) {
-            provider_order.push(provider);
-        }
-    }
-    if provider_order.is_empty() {
-        provider_order = SKILL_PROVIDERS.to_vec();
-    }
-    if let Some(preferred) = settings.skill.preferred_provider.as_deref() {
-        provider_order.retain(|provider| *provider != preferred);
-        provider_order.insert(0, preferred);
-    }
-    let conserve = settings
-        .skill
-        .conserve_provider
-        .as_ref()
-        .map(|provider| vec![provider.as_str()])
-        .unwrap_or_default();
-    let max_workers = saved
-        .get("maxWorkers")
-        .and_then(Value::as_u64)
-        .filter(|count| (1..=16).contains(count))
-        .unwrap_or(16);
-    let mut policy = match saved {
-        Value::Object(fields) => fields.clone(),
-        _ => serde_json::Map::new(),
-    };
-    policy.extend([
-        ("version".to_string(), json!(1)),
-        (
-            "onboarded".to_string(),
-            json!(saved
-                .get("onboarded")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)),
-        ),
-        ("backend".to_string(), json!(settings.skill.backend)),
-        (
-            "defaultStrategy".to_string(),
-            json!(settings.skill.default_strategy),
-        ),
-        (
-            "providerSwitch".to_string(),
-            json!(settings.skill.provider_switch),
-        ),
-        ("providerOrder".to_string(), json!(provider_order)),
-        ("conserveProviders".to_string(), json!(conserve)),
-        ("maxWorkers".to_string(), json!(max_workers)),
-        (
-            "maxConcurrent".to_string(),
-            json!(settings.max_concurrent.clamp(1, 16)),
-        ),
-    ]);
-    Value::Object(policy)
-}
-
-fn write_skill_policy(settings: &OrchestrationSettings) -> Result<(), String> {
-    if !matches!(settings.skill.backend.as_str(), "auto" | "skill" | "mcp")
-        || !matches!(
-            settings.skill.default_strategy.as_str(),
-            "auto" | "economy" | "balanced" | "quality" | "research" | "parallel" | "rescue"
-        )
-        || !matches!(
-            settings.skill.provider_switch.as_str(),
-            "ask" | "automatic" | "never"
-        )
-        || settings
-            .skill
-            .conserve_provider
-            .as_deref()
-            .is_some_and(|provider| !matches!(provider, "codex" | "claude" | "agy" | "kimi"))
-        || settings
-            .skill
-            .preferred_provider
-            .as_deref()
-            .is_some_and(|provider| !matches!(provider, "codex" | "claude" | "agy" | "kimi"))
-    {
-        return Err("invalid_orchestrator_skill_policy".to_string());
-    }
-    let path = skill_policy_path()?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| "orchestrator_skill_policy_parent_missing".to_string())?;
-    std::fs::create_dir_all(parent).map_err(|error| format!("mkdir_failed:{error}"))?;
-
-    let saved = std::fs::read(&path)
-        .ok()
-        .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
-        .unwrap_or(Value::Null);
-    let policy = skill_policy_value(settings, &saved);
-    let body = serde_json::to_vec_pretty(&policy).map_err(|error| error.to_string())?;
-    std::fs::write(path, body).map_err(|error| format!("write_failed:{error}"))
-}
-
 /// The Orchestration settings from Preferences, sent when the app loads and whenever they change.
 #[tauri::command]
 pub fn orchestrator_apply_settings(
     state: tauri::State<'_, OrchestratorState>,
     settings: OrchestrationSettings,
 ) -> Result<(), String> {
-    write_skill_policy(&settings)?;
     state.core.apply_settings(settings);
     Ok(())
 }
@@ -484,7 +379,11 @@ pub fn orchestrator_message(
     let mut arguments = serde_json::Map::new();
     arguments.insert("jobId".into(), Value::String(job_id));
     arguments.insert("message".into(), Value::String(message));
-    let tool = if steer { "coding_agent_steer" } else { "coding_agent_send" };
+    let tool = if steer {
+        "coding_agent_steer"
+    } else {
+        "coding_agent_send"
+    };
     crate::orchestrator_core::call_tool(&state.core, tool, &arguments, None)
 }
 
@@ -538,11 +437,7 @@ pub fn orchestrator_restart(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        orchestration_window_label, read_playbooks, skill_policy_value, write_playbooks,
-        write_skill_policy, OrchestrationSettings, BUNDLED_PLAYBOOKS,
-    };
-    use serde_json::{json, Value};
+    use super::{orchestration_window_label, read_playbooks, write_playbooks, BUNDLED_PLAYBOOKS};
 
     // One detached board window per orchestration pane, with a label the capability matches (#247).
     #[test]
@@ -557,80 +452,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn the_local_skill_policy_carries_preferences_without_mcp() {
-        let settings: OrchestrationSettings = serde_json::from_value(json!({
-            "maxConcurrent": 3,
-            "defaultTimeoutSeconds": 900,
-            "skill": {
-                "backend": "skill",
-                "defaultStrategy": "economy",
-                "providerSwitch": "automatic",
-                "conserveProvider": "claude",
-                "preferredProvider": "kimi"
-            }
-        }))
-        .expect("settings");
-
-        let policy = skill_policy_value(&settings, &Value::Null);
-        assert_eq!(policy["backend"], json!("skill"));
-        assert_eq!(policy["defaultStrategy"], json!("economy"));
-        assert_eq!(policy["conserveProviders"], json!(["claude"]));
-        assert_eq!(
-            policy["providerOrder"],
-            json!(["kimi", "codex", "claude", "agy"])
-        );
-        assert_eq!(policy["maxConcurrent"], json!(3));
-        assert_eq!(policy["onboarded"], json!(false));
-    }
-
-    #[test]
-    fn the_app_keeps_the_skill_settings_it_does_not_show() {
-        let settings: OrchestrationSettings = serde_json::from_value(json!({
-            "maxConcurrent": 3,
-            "defaultTimeoutSeconds": 900,
-            "skill": {
-                "backend": "auto",
-                "defaultStrategy": "auto",
-                "providerSwitch": "ask",
-                "preferredProvider": "claude"
-            }
-        }))
-        .expect("settings");
-        let saved = json!({
-            "version": 1,
-            "onboarded": true,
-            "backend": "skill",
-            "providerOrder": ["agy", "kimi", "claude", "antigravity"],
-            "maxWorkers": 6,
-            "budget": { "maxCalls": 4 },
-            "modelTiers": { "cheap": { "codex": { "effort": "low" } } }
-        });
-
-        let policy = skill_policy_value(&settings, &saved);
-        assert_eq!(policy["providerOrder"], json!(["claude", "agy", "kimi"]));
-        assert_eq!(policy["budget"], json!({ "maxCalls": 4 }));
-        assert_eq!(policy["modelTiers"], saved["modelTiers"]);
-        assert_eq!(policy["maxWorkers"], json!(6));
-        assert_eq!(policy["onboarded"], json!(true));
-        assert_eq!(policy["backend"], json!("auto"));
-        assert_eq!(policy["maxConcurrent"], json!(3));
-    }
-
-    #[test]
-    fn an_invalid_local_skill_policy_is_refused_before_writing() {
-        let settings: OrchestrationSettings = serde_json::from_value(json!({
-            "maxConcurrent": 3,
-            "defaultTimeoutSeconds": 900,
-            "skill": { "backend": "remote" }
-        }))
-        .expect("settings");
-
-        assert_eq!(
-            write_skill_policy(&settings).unwrap_err(),
-            "invalid_orchestrator_skill_policy"
-        );
-    }
     fn scratch_playbooks() -> std::path::PathBuf {
         std::env::temp_dir()
             .join(format!("coding-opus-playbooks-{}", nanoid::nanoid!(8)))

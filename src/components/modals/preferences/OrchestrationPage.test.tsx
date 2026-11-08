@@ -2,11 +2,7 @@ import { act, fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { orchestratorCodexModels } from '../../../lib/tauri/orchestrator'
-import {
-  DEFAULT_ROUTER9_PREFERENCES,
-  EMPTY_PROJECTS_FILE,
-  type OrchestrationRole,
-} from '../../../lib/types'
+import { EMPTY_PROJECTS_FILE, type OrchestrationRole } from '../../../lib/types'
 import { useProjectsStore } from '../../../stores/projectsStore'
 import { OrchestrationPage } from './OrchestrationPage'
 
@@ -43,38 +39,13 @@ beforeEach(() => withRoles([]))
 
 // The Orchestration category of Preferences (#254).
 describe('OrchestrationPage', { timeout: 20_000 }, () => {
-  it('saves the bundled skill backend, strategy, and provider switching policy', () => {
-    render(<OrchestrationPage />)
-
-    choose('Preferred backend', 'Local skill only')
-    choose('Default strategy', 'Economy')
-    choose('Provider to conserve', 'Claude Code')
-    choose('When that provider is selected', 'Switch automatically')
-    choose('Preferred local provider', 'Kimi Code')
-
-    expect(orchestration().skill).toEqual({
-      backend: 'skill',
-      defaultStrategy: 'economy',
-      providerSwitch: 'automatic',
-      conserveProvider: 'claude',
-      preferredProvider: 'kimi',
-    })
-  })
-
-  it('previews the selected strategy and shows 9router only for the default route', () => {
-    render(<OrchestrationPage />)
-
-    choose('Default strategy', 'Quality')
-    expect(screen.getByRole('region', { name: 'Strategy architecture' })).toBeTruthy()
-    expect(screen.getByText('Worker 2 · review')).toBeTruthy()
-    expect(screen.queryByText('9router')).toBeNull()
-
-    act(() => {
-      useProjectsStore.getState().setPreferences({
-        router9: { ...DEFAULT_ROUTER9_PREFERENCES, enabled: true, defaultForNewAgents: true },
-      })
-    })
-    expect(screen.getByText('9router')).toBeTruthy()
+  it('explains that Coding Opus decides and the board runs, and links to the playbooks', () => {
+    const onOpenPlaybooks = vi.fn()
+    render(<OrchestrationPage onOpenPlaybooks={onOpenPlaybooks} />)
+    expect(screen.getByText(/picks a playbook and resolves the model and effort/)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Preferred backend' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'See every playbook as a flow' }))
+    expect(onOpenPlaybooks).toHaveBeenCalledTimes(1)
   })
 
   it('adds a role that the orchestrator can run as soon as it appears', () => {

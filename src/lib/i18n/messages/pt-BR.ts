@@ -710,7 +710,7 @@ export const ptBR: Record<MessageKey, string> = {
     'Acompanha as sessões filhas isoladas que o OpenCode roda durante o planejamento e mostra a atividade delas ao vivo. Só aparece em projetos com um terminal OpenCode.',
   'features.aiMemory.title': 'AI Memory',
   'features.aiMemory.description':
-    'Memória de longo prazo compartilhada entre Claude Code, Codex e OpenCode. Requer o servidor ai-memory instalado.',
+    'Memória extra opcional pelo servidor ai-memory, compartilhada entre Claude Code, Codex e OpenCode. A memória padrão do Coding Agent é o second brain (abaixo); ligue esta só se quiser também o ai-memory.',
   'aiMemory.notInstalledTitle': 'AI Memory está ligado, mas o ai-memory não foi encontrado',
   'aiMemory.notInstalledBody':
     'Instale o servidor ai-memory para os agentes compartilharem memória de longo prazo. Os agentes iniciam normalmente sem ele.',
@@ -861,9 +861,9 @@ export const ptBR: Record<MessageKey, string> = {
   'prefs.categoryPlaybooksDesc':
     'Como cada playbook de orquestração flui, quais modelos ele usa e quando troca.',
   'prefs.strategyDiagramOpenPlaybooks': 'Ver cada playbook como fluxograma',
-  'prefs.orchestrationSkill': 'Skill de orquestração local',
+  'prefs.orchestrationSkill': 'Coding Opus',
   'prefs.orchestrationSkillDesc':
-    'Escolha como a skill incluída funciona ao orquestrar com ou sem MCP.',
+    'A skill Coding Opus incluída decide o que delegar; o Coding Agent executa os workers.',
   'prefs.orchestrationSkillBackend': 'Backend preferido',
   'prefs.orchestrationSkillBackend.auto': 'Automático',
   'prefs.orchestrationSkillBackend.skill': 'Somente skill local',
@@ -885,7 +885,7 @@ export const ptBR: Record<MessageKey, string> = {
   'prefs.orchestrationSkillProviderNone': 'Nenhum',
   'prefs.orchestrationSkillProviderAuto': 'Ordem automática',
   'prefs.orchestrationSkillHint':
-    'O Coding Agent exporta estas escolhas para o arquivo local de política da skill incluída. O runner lê esse arquivo diretamente e não precisa de MCP. Uma instrução explícita no prompt atual sempre vence.',
+    'A Coding Opus consulta o second brain, escolhe um playbook e resolve o modelo e o esforço de cada fase, depois delega por este quadro. Edite as estratégias em Playbooks; papéis, roteamento e limites ficam abaixo.',
   'prefs.strategyDiagramTitle': 'Arquitetura da estratégia',
   'prefs.strategyDiagramPlanner': 'Planejador',
   'prefs.strategyDiagramTask': 'Sua tarefa',

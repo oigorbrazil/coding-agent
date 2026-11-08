@@ -40,8 +40,8 @@ the next wave's brief. Instead:
 
 1. Record the resolved decision in a small state or spec file in the workspace (such as
    `.planning/STATE.md` or `PLAN.md`) and point subsequent workers to that path.
-2. Log the plan adjustment with `scripts/orchestrate.py note "<decision added after NEEDS_CONTEXT>" --kind add`.
-3. Launch the next wave referencing the updated state file.
+2. Send the next unit, or the same worker with `coding_agent_send`, pointing at the updated state
+   file.
 
 ## Checking a writer's work
 
@@ -101,7 +101,7 @@ NOT CHECKED: <criteria nobody demonstrated, or none>
 
 PASS needs every criterion demonstrated and nothing left unchecked. FAIL means a failure was
 shown. NOT_PROVEN means evidence is missing, so run the missing check before fixing anything. The
-runner reads the `VERDICT:` line into `outcome.json`, and the report flags FAIL and NOT_PROVEN.
+lead reads the `VERDICT:` line from the worker's delivery and reports FAIL and NOT_PROVEN.
 
 ## Re-review
 

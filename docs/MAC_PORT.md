@@ -36,6 +36,9 @@ Mac synced through: `v1.7.0` (`80e44a3`)
 
 ## Unreleased
 
+- `pending` · `ui` · feat: single orchestration path, Coding Opus decides and the board runs
+  - Files: `src/components/modals/preferences/OrchestrationPage.tsx`, `src-tauri/src/orchestrator.rs`, `src-tauri/src/second_brain.rs`
+  - Contract: the app no longer writes `coding-opus-orchestrate.json`; second brain notes follow brain.py's `render_note` (flow tags, `area`, `status` by folder, `## Conteúdo`).
 - `pending` · `ui` · `21fc57f` feat: second brain panel and Save to second brain on the board
   - Files: `src-tauri/src/second_brain.rs`, `src/components/modals/preferences/SecondBrainPanel.tsx`, `src/lib/orchestratorRunNote.ts`
   - Contract: new notes are Markdown files with the Coding Opus frontmatter (`id`, `title`, `area`, `type`, `tags`, `status`, `created`, `updated`) under `<Documents>/second brain` or `CODING_OPUS_BRAIN`; existing notes are never edited.

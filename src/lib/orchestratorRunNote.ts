@@ -20,8 +20,14 @@ export function isRunSettled(run: OrchestratorRun): boolean {
   return run.counts.running === 0 && run.counts.queued === 0 && run.counts.blocked === 0
 }
 
+/** `YYYYMMDD-HHMM` in local time, the id format the Coding Opus skill uses. */
+export function localStamp(now: Date): string {
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}`
+}
+
 /** The second brain note for one delegation run: who ran what, what came back and what it cost. */
-export function runNote(run: OrchestratorRun): SecondBrainRecordRequest {
+export function runNote(run: OrchestratorRun, now: Date = new Date()): SecondBrainRecordRequest {
   const project = run.jobs.map((job) => basename(job.cwd)).find((name) => name.length > 0) ?? ''
   const totalTokens = run.jobs.reduce((sum, job) => sum + (job.tokens?.total?.totalTokens ?? 0), 0)
   const priced = run.jobs.filter((job) => job.costUsd !== null)
@@ -72,6 +78,8 @@ export function runNote(run: OrchestratorRun): SecondBrainRecordRequest {
     folder: project ? `30-Projetos/${project}` : '00-Inbox',
     summary,
     body,
-    tags: project ? ['orquestracao', project] : ['orquestracao'],
+    tags: project ? [project] : [],
+    kind: 'nota',
+    localStamp: localStamp(now),
   }
 }

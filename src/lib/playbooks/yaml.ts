@@ -374,7 +374,7 @@ export function emitPlaybooksYaml(root: Record<string, unknown>): string {
   return (
     [
       '# coding-opus-playbooks.yaml',
-      '# The lead reads this file (scripts/orchestrate.py playbook) before it plans or delegates.',
+      '# The lead reads this file (scripts/playbook.py) before it plans or delegates.',
       emit(root, 0).replace(/^\n/, ''),
     ].join('\n') + '\n'
   )

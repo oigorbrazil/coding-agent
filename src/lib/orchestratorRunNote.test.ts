@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { isRunSettled, runNote } from './orchestratorRunNote'
+import { isRunSettled, localStamp, runNote } from './orchestratorRunNote'
 import { groupRuns } from './orchestratorRuns'
 import type { OrchestratorJob } from './tauri'
 
@@ -57,7 +57,8 @@ describe('runNote', () => {
     const note = runNote(run)
     expect(note.title).toBe('refactor payments')
     expect(note.folder).toBe('30-Projetos/shop')
-    expect(note.tags).toEqual(['orquestracao', 'shop'])
+    expect(note.tags).toEqual(['shop'])
+    expect(note.kind).toBe('nota')
     expect(note.summary).toBe('2 worker(s) · 2,000 tokens · $0.0040 · 25 s of worker time')
     expect(note.body).toContain(
       '| job-01 | claude / haiku / low | done (succeeded) | 1200 | $0.0040 | 12 s |',
@@ -69,6 +70,12 @@ describe('runNote', () => {
   it('says when no provider reported a price', () => {
     const [run] = groupRuns([job({ id: 'job-01', runId: 'run-01' })])
     expect(runNote(run).summary).toContain('no price reported')
+  })
+})
+
+describe('localStamp', () => {
+  it('formats local time the way the skill names note ids', () => {
+    expect(localStamp(new Date(2026, 10, 7, 9, 5))).toBe('20261107-0905')
   })
 })
 

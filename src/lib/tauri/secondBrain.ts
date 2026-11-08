@@ -24,6 +24,13 @@ export type SecondBrainRecordRequest = {
   summary?: string
   body?: string
   tags?: string[]
+  /** `nota` by default; `decisao` adds the Motivo and Consequências sections. */
+  kind?: 'decisao' | 'nota' | 'estudo' | 'ideia' | 'meeting'
+  area?: string
+  /** Wikilink targets listed under "Notas relacionadas". */
+  related?: string[]
+  /** Local time as YYYYMMDD-HHMM: the note id and dates follow the user's clock, as in the skill. */
+  localStamp?: string
 }
 
 export async function secondBrainStatus(): Promise<SecondBrainStatus> {

@@ -15,7 +15,10 @@ Notable user-facing changes to **Coding Agent** are documented here. The format 
 
 - Second brain in the app: Preferences ▸ Features shows the global `second brain` folder the Coding Opus skill uses, with its note count and the latest notes.
 - Orchestration board: every settled run has **Save to second brain**, which writes its workers, results, tokens and cost as a new note under `30-Projetos/<project>` without touching existing notes.
-- Coding Opus skill 27: the separate plugin packaging is gone; the skill ships through Coding Agent.
+- Coding Opus skill 28: the skill only remembers and decides (second brain, playbook choice, escalation); Coding Agent runs every worker. Its own runner, playbook editor page, usage and report commands are gone, replaced by the app's board and Preferences.
+- Preferences ▸ Orchestration no longer shows the old runner's backend, strategy and provider options, and the app stops writing that runner's policy file.
+- Notes saved from the board and from `/coding registrar` now share one format.
+- AI Memory is described as optional; the second brain is the default memory.
 
 ## [1.7.1] — 2026-11-07
 

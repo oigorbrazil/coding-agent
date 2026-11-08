@@ -1,25 +1,19 @@
 # Playbook file reference
 
-Run `scripts/orchestrate.py playbook --pick` before planning. It prints the active profile and
-provider order, one line per `pickOrder` entry, and each playbook's id, name and `pickWhen`.
-Then `playbook <id>` prints only that playbook, the resolved active tiers (provider and tier to
-model/effort), provider order, quota and budget rules. Both accept `--json`.
+Run `scripts/playbook.py --pick` before planning. It prints the active profile and provider order,
+one line per `pickOrder` entry, and each playbook's id, name and `pickWhen`. Then
+`scripts/playbook.py <id>` prints only that playbook, the resolved tiers (provider and tier to
+model and effort), provider order, quota and budget rules. Both accept `--json`.
 
-Plain `playbook` prints the whole effective file for editing and onboarding only. The user's copy
-replaces the bundled file. `playbook --init` copies it next to the saved policy; delete the copy
-to restore defaults. `doctor` validates the copy. See [onboarding.md](onboarding.md) for setup.
+The user's copy (`%APPDATA%\CodingOpus\coding-opus-playbooks.yaml`, or `~/.config/coding-opus/`)
+replaces the bundled file. `playbook.py --path` prints the file in use and `playbook.py --check`
+validates it.
 
 ## See and edit the playbooks
 
-`editor` writes the effective playbooks as a flow page, `coding-opus-playbooks.html` next to the policy
-(or `--out <file>`), and opens it (`--no-open` only writes it). Each playbook is a flowchart with
-its conditions, fallbacks and the model each step resolves to under the chosen profile. The page
-starts from the latest quota readings as the `now` usage preset; the other presets and sliders
-only simulate. Task, checks and budget switches show which branch runs. Edits stay in the page
-until the user copies or downloads the YAML; save it over the user's copy and run `doctor` before
-the next plan. The page is one offline file and reads the YAML itself, so it needs no Python: see
-[manual.md](manual.md). It shows the playbooks; to show one plan's workers, use
-[diagram.md](diagram.md).
+Coding Agent edits the playbooks in **Preferences ▸ Playbooks**, a flow view of every playbook
+with its conditions and the model each step resolves to, and saves the user's copy. Point the user
+there; do not edit the YAML by hand unless asked, and run `playbook.py --check` after any edit.
 
 ## Top level
 
@@ -66,9 +60,8 @@ that many minutes since the last printed check, when the lead's list-price estim
 new spend step, or when a known provider becomes low/blocked or resets. `prefer` is a nonempty
 ordered list of distinct configured provider ids; honor billing and quota before routing.
 `askAboveWorkers` is a positive integer: ask before exceeding it with parallel workers.
-The hook reads local quota only, labels stale or missing readings unknown, and scans Codex
-sessions on due checks. A change to the last known Codex file can signal a quota transition
-between checks; new session files are discovered at the next due scan.
+In Coding Agent the lead applies these between requests from the `fitness` block; there is no
+background hook.
 
 ## Providers
 
@@ -118,9 +111,9 @@ A playbook lists `phases`. Each phase is one role:
 | `provider` | `auto` (default) takes the first provider in the active order that can run the phase; a provider id pins it |
 | `model`, `effort` | Override the tier for this phase |
 | `readOnly` | Run workers with `mode: read-only` |
-| `workers` | Units in the wave, within the runner's limit |
+| `workers` | Units in the wave, within the app's concurrency limit (Preferences ▸ Orchestration) |
 | `isolate` | Give each writer its own worktree |
-| `runner` | The plan's runner strategy (`strategy`) for the wave: `economy`, `balanced`, `quality`, `research`, `parallel` or `rescue` |
+| `runner` | Legacy runner strategy (`economy`, `balanced`, `quality`, `research`, `parallel` or `rescue`); kept for compatibility, Coding Agent ignores it |
 | `does`, `returns`, `limit` | What to put in each brief and what to ask back |
 | `gate` | What you check after the phase before moving on |
 | `if` | The phase runs only when the condition holds |
@@ -138,28 +131,26 @@ For each worker:
    unless it also names that provider. A rule can steer a phase off expensive models with
    `price-above` and cap a run's later waves with `spent-above`, for example
    `if: price-above:5` → `use: { tier: cheap }`.
-3. Before every wave run `usage`. If the chosen provider is low, move to the next capable provider
-   in the active order at the same tier, resolving that provider's model and effort. Respect a
-   provider the user pinned; a playbook's suggested provider does not prevent adapting the plan.
-   Never lower a tier to dodge a low provider; ask the user instead.
-4. If every provider is low, follow `quota.onBothCritical`. If the `dry-run` forecast passes
-   `quota.stopAt`, ask the user whatever `onBothCritical` says.
+3. Before every delegation, read the `fitness` block that `coding_agent_status` (and every other
+   `coding_agent_*` response) returns. If the chosen provider is low, move to the next capable
+   provider in the active order at the same tier, resolving that provider's model and effort.
+   Respect a provider the user pinned; a playbook's suggested provider does not prevent adapting
+   the plan. Never lower a tier to dodge a low provider; ask the user instead.
+4. If every provider is low, follow `quota.onBothCritical`.
 5. Apply `quota.whenSpare` only to subscription-billed providers when unused quota would be lost,
-   under every goal, profile and runner strategy. Check `billing` in `coding-opus-prices.json` (default
+   under every goal and profile. Check `billing` in `coding-opus-prices.json` (default
    `subscription`); API billing has no expiring quota and never triggers this rule. Keep the default
    `spend-strong`. Goal `save` is not required. Keep budget limits and user provider pins; when
    several subscription providers have spare quota, prefer the one that loses it first.
 
-Change the plan before launching; these are lead decisions, not automatic live quota routing by
-the runner. The runner only enforces `quota.stopAt`: it refuses a wave on a provider at or past it
-and skips queued workers once a running wave crosses it, unless the user agreed to
-`run --allow-low-quota`. Tell the user at most one quota line per wave with the readings and reset time, and
-record it with `note "<reason and readings>" --kind switch`. Say when a reading is stale rather
-than asserting its number. `quota.whenLow: keep` remains a file setting; the skill's pre-wave
-check still calls for adapting an unpinned low-provider plan.
+Change the plan before delegating; these are lead decisions. A provider at or past `quota.stopAt`
+is out: its workers end as `succeeded` with nothing done. Tell the user at most one quota line per
+delegation with the reading and reset time. Say when a reading is stale rather than asserting its
+number.
 
-Pass the resolved model and effort explicitly. If a model remains empty, the CLI uses its default;
-both `validate` and `dry-run` warn even when an effort is set.
+Pass the resolved model and effort explicitly in `coding_agent_delegate` (or a role from the app's
+Orchestration settings). If a model stays empty, the CLI uses its default model, which can be the
+most expensive one.
 
 ## Usage windows
 
@@ -173,25 +164,12 @@ both `validate` and `dry-run` warn even when an effort is set.
 | `copilot` | `premium` | monthly premium requests |
 | `gemini` | `day` | none |
 
-`usage` reads Claude quota from each Claude worker's `rate_limit_event`, as fresh as the last
-Claude worker, and Codex quota from its own session files, freshly read without starting a worker.
-`usage --refresh-claude` reads Claude now with a one-line Haiku call. None needs Coding Opus. Readings
-are cached in `coding-opus-usage.json` next to the policy; `status` and `doctor` show summaries, and
-`dry-run` warns for each worker on a low provider.
-
-Each provider/window reports `usedPercent`, `resetsAt`, `ageMinutes`, `low` (at or above
-`quota.criticalThreshold`), `blocked` (at or above `quota.stopAt`), `stale` (>30 minutes), and
-`reset`. Use the active profile's thresholds. Within a window usage only grows, so a stale reading
-still blocks until its `resetsAt` passes. Claude's `opus` window blocks only Opus workers.
-
-After each wave the runner records what each worker took of each window it can compare, in the
-same window before and after, as a sample in `coding-opus-usage.json` (the last 40 are kept). Samples
-include anything else that used the account during the wave, so they overstate rather than
-understate. `dry-run` turns the recent ones into `quotaForecast`: the median per worker of the same
-model, or of the provider when the model has fewer than two, summed over the wave's workers. Fewer
-than two samples leave it unknown.
-Antigravity and Kimi readings still need Coding Opus or the user; other providers need the user.
-Missing or stale data is unknown, not evidence of spare quota or available capacity.
+Coding Agent polls the provider usage and returns it as the `fitness` block of every
+`coding_agent_*` response: for each provider the worst window, `used` percent, `resetsAt` and
+`rateLimited`. Use the active profile's thresholds: `low` at or above `quota.criticalThreshold`,
+out at or above `quota.stopAt`. Within a window usage only grows, so a stale reading still blocks
+until its `resetsAt` passes. Claude's `opus` window blocks only Opus workers. Missing data is
+unknown, not evidence of spare quota.
 
 ## Spare quota
 
@@ -199,7 +177,7 @@ A provider's quota is spare when it is not low, at least `spareMinLeft` percent 
 left, and that quota would be lost: its plan ends before the cycle resets, or the cycle resets
 within `spareWithinHours`. A plan that ends in 2 days while the week resets in 6 loses everything
 left. For subscription billing, spending that quota does not add an API charge; API billing still
-incurs the model's price. See [operations.md](operations.md) for billing and price rules.
+incurs the model's price. Prices and billing per model live in the app's `prices.json`.
 
 ## Conditions
 
@@ -219,7 +197,7 @@ negate it. `<provider>` is any provider id and `<window>` one of its windows abo
 | `<provider>-spare` | That subscription-billed provider has fresh spare quota; false for API billing |
 | `budget-low` | More than `budget.warnAt` percent of the plan budget is spent |
 | `price-above:<usd>` | The model the unit would run on, from the phase's tier, provider and model before this rule, lists an input price above `<usd>` US dollars per 1M tokens in the price table, for example `price-above:5` or `price-above:2.5`. A model with no known price, including the CLI's default when none is pinned, cannot establish it |
-| `spent-above:<usd>` | This orchestration's reported spend so far, as `status` and `report` total it, is above `<usd>` US dollars. Only cost the CLIs reported counts; nothing is estimated |
+| `spent-above:<usd>` | This orchestration's reported spend so far, as the Coding Agent board totals it, is above `<usd>` US dollars. Only cost the CLIs reported counts; nothing is estimated |
 | `checks-failed`, `checks-failed-twice` | The phase's checks failed once, or twice |
 | `report-weak` | A report lacks the evidence it was asked for |
 | `conflict` | Reports contradict each other |
@@ -234,7 +212,7 @@ the user; for other providers, ask the user. A stale or absent reading cannot es
 Spare quota requires subscription billing (`billing` defaults to `subscription`), never API billing,
 and also needs a reset time; a non-renewing plan end comes from `quota.planEnds` or the
 user. Ignore a `planEnds` date that has passed. Task, check and report conditions are judged by
-the lead from evidence; budget conditions, `spent-above` among them, use the plan's recorded spend.
+the lead from evidence; budget conditions, `spent-above` among them, use the spend the board reports.
 `price-above` reads the price table `models` shows: the bundled `prices.json` overlaid by
 `coding-opus-prices.json` next to the policy, keyed `provider/model`. It is a planning choice the lead
 makes before the wave.

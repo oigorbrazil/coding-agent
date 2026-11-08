@@ -644,7 +644,7 @@ export const zhCN: Record<MessageKey, string> = {
     '跟踪 OpenCode 在计划时运行的孤立子会话，并实时显示它们的活动。仅在具有 OpenCode 终端的项目中显示。',
   'features.aiMemory.title': '人工智能记忆',
   'features.aiMemory.description':
-    '长时记忆在 Claude Code、Codex 和 OpenCode 之间共享。需要安装 ai-memory 服务器。',
+    '通过 ai-memory 服务器提供的可选额外记忆，在 Claude Code、Codex 和 OpenCode 之间共享。Coding Agent 的默认记忆是第二大脑（见下方）；只有在也想使用 ai-memory 时才开启此项。',
   'aiMemory.notInstalledTitle': 'AI 记忆已开启，但未找到 ai-memory',
   'aiMemory.notInstalledBody':
     '安装 ai-memory 服务器以便代理可以共享长期记忆。没有它，代理仍会正常启动。',
@@ -739,8 +739,9 @@ export const zhCN: Record<MessageKey, string> = {
   'prefs.categoryPlaybooks': '剧本',
   'prefs.categoryPlaybooksDesc': '每个编排剧本的流程、使用的模型以及何时切换。',
   'prefs.strategyDiagramOpenPlaybooks': '以流程图查看每个剧本',
-  'prefs.orchestrationSkill': '本地编排技能',
-  'prefs.orchestrationSkillDesc': '选择内置技能在使用或不使用 MCP 时的编排方式。',
+  'prefs.orchestrationSkill': 'Coding Opus',
+  'prefs.orchestrationSkillDesc':
+    '内置的 Coding Opus 技能决定委派什么；由 Coding Agent 运行工作者。',
   'prefs.orchestrationSkillBackend': '首选后端',
   'prefs.orchestrationSkillBackend.auto': '自动',
   'prefs.orchestrationSkillBackend.skill': '仅使用本地技能',
@@ -762,7 +763,7 @@ export const zhCN: Record<MessageKey, string> = {
   'prefs.orchestrationSkillProviderNone': '无',
   'prefs.orchestrationSkillProviderAuto': '自动顺序',
   'prefs.orchestrationSkillHint':
-    'Coding Agent 会把这些选择导出到内置技能的本地策略文件。技能运行器直接读取该文件，无需 MCP。当前提示中的明确指令始终优先。',
+    'Coding Opus 会读取第二大脑、选择剧本并确定每个阶段的模型和推理强度，然后通过此看板委派。在“剧本”中编辑策略；角色、路由和限制见下方。',
   'prefs.strategyDiagramTitle': '策略架构',
   'prefs.strategyDiagramPlanner': '规划者',
   'prefs.strategyDiagramTask': '你的任务',

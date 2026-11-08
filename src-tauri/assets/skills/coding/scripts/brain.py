@@ -7,7 +7,7 @@ O second brain é uma pasta global, a mesma para todos os projetos:
   brain.py where                                   onde fica o second brain e se já existe
   brain.py install [--areas A B C] [--no-rules] [--dry-run]
   brain.py find    TERMOS... [--route PASTA] [--limit 5] [--json]
-  brain.py record  --title T [--folder PASTA] [--orchestration DIR]
+  brain.py record  --title T [--folder PASTA] [--summary S] [--body B]
                    [--type decisao|nota|estudo|ideia|meeting] [--area A] [--write]
 
 `--brain CAMINHO` (ou a variável CODING_OPUS_BRAIN) troca o local padrão em qualquer comando.
@@ -20,7 +20,6 @@ import datetime as dt
 import json
 import os
 import re
-import subprocess
 import sys
 import unicodedata
 from pathlib import Path
@@ -387,31 +386,26 @@ def new_id(brain: Path, now: dt.datetime) -> str:
     return stamp.strftime("%Y%m%d-%H%M")
 
 
-def current_orchestration() -> Optional[str]:
-    """A orquestração atual segundo o próprio runner (o ponteiro é por sessão do Claude Code)."""
-    import importlib.util
-    script = Path(__file__).resolve().parent / "orchestrate.py"
-    try:
-        spec = importlib.util.spec_from_file_location("coding_opus_orchestrate", script)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        folder = module.current_folder()
-        return str(folder) if folder else None
-    except Exception:  # sem o runner, o registro segue sem relatório anexado
-        return None
+def tag_list(extra: List[str]) -> List[str]:
+    return list(dict.fromkeys(["coding-agent", "orquestracao", *(slugify(t) for t in extra if t.strip())]))
 
 
-def orchestration_report(folder: Optional[str]) -> str:
-    command = [sys.executable, str(Path(__file__).resolve().parent / "orchestrate.py"), "report", "--format", "markdown"]
-    if folder:
-        command.append(folder)
-    try:
-        done = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", timeout=120)
-    except (OSError, subprocess.TimeoutExpired) as error:
-        raise BrainError(f"não consegui gerar o relatório da orquestração: {error}")
-    if done.returncode != 0:
-        raise BrainError("relatório da orquestração falhou: " + (done.stderr or done.stdout).strip()[:500])
-    return done.stdout.strip()
+def render_note(title: str, folder: str, kind: str, area: str, tags: List[str], summary: str, body: str,
+                related: List[str], note_id: str, date: str) -> str:
+    """O formato único das notas da Coding Opus; o Coding Agent grava o mesmo (second_brain.rs)."""
+    q = lambda v: json.dumps(v, ensure_ascii=False)
+    lines = ["---", f"id: {q(note_id)}", f"title: {q(title)}", f"area: {q(area)}", f"type: {kind}",
+             "tags: [" + ", ".join(tag_list(tags)) + "]",
+             "status: " + ("inbox" if Path(folder).parts[:1] == ("00-Inbox",) else "ativo"),
+             f"created: {q(date)}", f"updated: {q(date)}", "---", "", f"# {title}", "",
+             "## " + ("Decisão" if kind == "decisao" else "Conteúdo"), "",
+             summary.strip() or "_Resumo do lead: o que foi decidido ou entregue e por quê._", ""]
+    if body.strip():
+        lines += [body.strip(), ""]
+    if kind == "decisao":
+        lines += ["## Motivo", "", "## Consequências", ""]
+    lines += ["## Notas relacionadas", "", *[f"- [[{n}]]" for n in related], ""]
+    return "\n".join(lines)
 
 
 def record(args: argparse.Namespace) -> int:
@@ -419,24 +413,9 @@ def record(args: argparse.Namespace) -> int:
     target = (brain / args.folder).resolve()
     if not inside(target, brain):
         raise BrainError(f"pasta fora do second brain: {args.folder}")
-    folder = args.orchestration or current_orchestration()
-    report = "" if args.no_report else orchestration_report(folder)
-    now = dt.datetime.now()
-    q = lambda v: json.dumps(v, ensure_ascii=False)
-    lines = ["---", f"id: {q(new_id(brain, now))}", f"title: {q(args.title)}", f"area: {q(args.area or '')}",
-             f"type: {args.type}", "tags: [" + ", ".join(dict.fromkeys(["coding-opus", "orquestracao", *args.tag])) + "]",
-             "status: " + ("inbox" if Path(args.folder).parts[:1] == ("00-Inbox",) else "ativo"),
-             f"created: {q(now.strftime('%Y-%m-%d'))}", f"updated: {q(now.strftime('%Y-%m-%d'))}"]
-    if folder and report:
-        lines.append(f"orchestration: {q(str(folder))}")
-    lines += ["---", "", f"# {args.title}", "", "## " + ("Decisão" if args.type == "decisao" else "Conteúdo"), "",
-              args.summary or "_Resumo do lead: o que foi decidido ou entregue e por quê._", ""]
-    if args.type == "decisao":
-        lines += ["## Motivo", "", "## Consequências", ""]
-    if report:
-        lines += ["## Relatório da orquestração", "", report, ""]
-    lines += ["## Notas relacionadas", "", *[f"- [[{n}]]" for n in args.related], ""]
-    content = "\n".join(lines)
+    now = dt.datetime.fromisoformat(args.now) if args.now else dt.datetime.now()
+    content = render_note(args.title, args.folder, args.type, args.area or "", args.tag, args.summary or "",
+                          args.body or "", args.related, new_id(brain, now), now.strftime("%Y-%m-%d"))
     path = target / f"{slugify(args.title)}.md"
     if not args.write:
         print(f"[prévia] {path.relative_to(brain).as_posix()}  (use --write para gravar)\n\n{content}")
@@ -477,11 +456,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     p.add_argument("--limit", type=int, default=5)
     p.add_argument("--json", action="store_true")
 
-    p = sub.add_parser("record", parents=[common], help="registra uma orquestração como nota")
+    p = sub.add_parser("record", parents=[common], help="registra uma decisão ou orquestração como nota")
     p.add_argument("--title", required=True)
     p.add_argument("--folder", default="00-Inbox")
-    p.add_argument("--orchestration", help="pasta da orquestração; padrão: a atual")
-    p.add_argument("--no-report", action="store_true")
+    p.add_argument("--body", help="texto depois do resumo, por exemplo o relatório do quadro")
+    p.add_argument("--no-report", action="store_true", help=argparse.SUPPRESS)  # aceito por compatibilidade
+    p.add_argument("--now", help=argparse.SUPPRESS)  # data fixa, para testes
     p.add_argument("--type", default="decisao", choices=["decisao", "nota", "estudo", "ideia", "meeting"])
     p.add_argument("--area")
     p.add_argument("--summary")

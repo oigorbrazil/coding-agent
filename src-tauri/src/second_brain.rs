@@ -16,7 +16,6 @@ const DEFAULT_FOLDER: &str = "00-Inbox";
 const TEMPLATES_FOLDER: &str = "99-Templates";
 const RECENT_LIMIT: usize = 5;
 const MAX_SCAN_DEPTH: usize = 6;
-const MAX_TITLE_CHARS: usize = 120;
 const MAX_NOTE_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone, Serialize)]
@@ -52,6 +51,18 @@ pub struct SecondBrainRecordRequest {
     pub body: String,
     #[serde(default)]
     pub tags: Vec<String>,
+    /// `nota` unless the caller says otherwise; `decisao` adds the Motivo/Consequências sections.
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub area: String,
+    /// Wikilink targets listed under "Notas relacionadas".
+    #[serde(default)]
+    pub related: Vec<String>,
+    /// The caller's local time as `YYYYMMDD-HHMM`; the note id and dates come from it, as the
+    /// skill uses local time. Falls back to UTC.
+    #[serde(default)]
+    pub local_stamp: Option<String>,
 }
 
 fn documents_dir() -> Option<PathBuf> {
@@ -246,56 +257,146 @@ fn safe_folder(folder: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-fn yaml_string(value: &str) -> String {
-    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+const NOTE_KINDS: [&str; 5] = ["decisao", "nota", "estudo", "ideia", "meeting"];
+const SUMMARY_PLACEHOLDER: &str = "_Resumo do lead: o que foi decidido ou entregue e por quê._";
+
+/// A JSON string, as `json.dumps(..., ensure_ascii=False)` writes it in brain.py.
+fn quoted(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
 }
 
-fn timestamp_parts(now: SystemTime) -> (String, String) {
+fn stamp_of(request: &SecondBrainRecordRequest, now: SystemTime) -> chrono::NaiveDateTime {
+    if let Some(stamp) = request.local_stamp.as_deref() {
+        if let Ok(parsed) = chrono::NaiveDateTime::parse_from_str(stamp, "%Y%m%d-%H%M") {
+            return parsed;
+        }
+    }
     let secs = now
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let moment = chrono::DateTime::from_timestamp(secs, 0).unwrap_or_default();
-    (
-        moment.format("%Y%m%d-%H%M").to_string(),
-        moment.format("%Y-%m-%d").to_string(),
-    )
+    chrono::DateTime::from_timestamp(secs, 0)
+        .unwrap_or_default()
+        .naive_utc()
 }
 
-pub fn render_note(request: &SecondBrainRecordRequest, now: SystemTime) -> String {
-    let (id, date) = timestamp_parts(now);
-    let mut tags: Vec<String> = vec!["coding-agent".to_string()];
-    for tag in &request.tags {
+fn existing_ids(root: &Path) -> std::collections::HashSet<String> {
+    let mut notes = Vec::new();
+    collect_notes(root, root, 0, &mut notes);
+    let mut ids = std::collections::HashSet::new();
+    for path in notes {
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let mut lines = text.lines();
+        if lines.next().map(str::trim) != Some("---") {
+            continue;
+        }
+        for line in lines.take(40) {
+            let line = line.trim();
+            if line == "---" {
+                break;
+            }
+            if let Some(value) = line.strip_prefix("id:") {
+                ids.insert(
+                    value
+                        .trim()
+                        .trim_matches(|c| c == '"' || c == '\'')
+                        .to_string(),
+                );
+            }
+        }
+    }
+    ids
+}
+
+/// The first free `YYYYMMDD-HHMM` from `stamp` on, one minute at a time, like brain.py's `new_id`.
+fn unique_id(stamp: chrono::NaiveDateTime, taken: &std::collections::HashSet<String>) -> String {
+    let mut current = stamp;
+    for _ in 0..1440 {
+        let id = current.format("%Y%m%d-%H%M").to_string();
+        if !taken.contains(&id) {
+            return id;
+        }
+        current += chrono::Duration::minutes(1);
+    }
+    current.format("%Y%m%d-%H%M").to_string()
+}
+
+/// The single Coding Opus note format. brain.py's `render_note` writes the same text.
+pub fn render_note(
+    request: &SecondBrainRecordRequest,
+    folder: &str,
+    id: &str,
+    date: &str,
+) -> String {
+    let kind = request
+        .kind
+        .as_deref()
+        .filter(|kind| NOTE_KINDS.contains(kind))
+        .unwrap_or("nota");
+    let mut tags = vec!["coding-agent".to_string(), "orquestracao".to_string()];
+    for tag in request.tags.iter().filter(|tag| !tag.trim().is_empty()) {
         let tag = slugify(tag);
         if !tags.contains(&tag) {
             tags.push(tag);
         }
     }
-    let title: String = request.title.trim().chars().take(MAX_TITLE_CHARS).collect();
-    let mut note = String::new();
-    note.push_str("---\n");
-    note.push_str(&format!("id: {}\n", yaml_string(&id)));
-    note.push_str(&format!("title: {}\n", yaml_string(&title)));
-    note.push_str("area: projetos\n");
-    note.push_str("type: nota\n");
-    note.push_str("tags:\n");
-    for tag in &tags {
-        note.push_str(&format!("  - {tag}\n"));
-    }
-    note.push_str("status: inbox\n");
-    note.push_str(&format!("created: {date}\n"));
-    note.push_str(&format!("updated: {date}\n"));
-    note.push_str("---\n\n");
-    note.push_str(&format!("# {title}\n\n"));
-    if !request.summary.trim().is_empty() {
-        note.push_str(request.summary.trim());
-        note.push_str("\n\n");
-    }
+    let title = request.title.trim();
+    let first = folder.split('/').next().unwrap_or("");
+    let status = if first == DEFAULT_FOLDER {
+        "inbox"
+    } else {
+        "ativo"
+    };
+    let summary = request.summary.trim();
+    let mut lines: Vec<String> = vec![
+        "---".into(),
+        format!("id: {}", quoted(id)),
+        format!("title: {}", quoted(title)),
+        format!("area: {}", quoted(request.area.trim())),
+        format!("type: {kind}"),
+        format!("tags: [{}]", tags.join(", ")),
+        format!("status: {status}"),
+        format!("created: {}", quoted(date)),
+        format!("updated: {}", quoted(date)),
+        "---".into(),
+        String::new(),
+        format!("# {title}"),
+        String::new(),
+        format!(
+            "## {}",
+            if kind == "decisao" {
+                "Decisão"
+            } else {
+                "Conteúdo"
+            }
+        ),
+        String::new(),
+        if summary.is_empty() {
+            SUMMARY_PLACEHOLDER.to_string()
+        } else {
+            summary.to_string()
+        },
+        String::new(),
+    ];
     if !request.body.trim().is_empty() {
-        note.push_str(request.body.trim());
-        note.push('\n');
+        lines.push(request.body.trim().to_string());
+        lines.push(String::new());
     }
-    note
+    if kind == "decisao" {
+        lines.extend([
+            "## Motivo".into(),
+            String::new(),
+            "## Consequências".into(),
+            String::new(),
+        ]);
+    }
+    lines.push("## Notas relacionadas".into());
+    lines.push(String::new());
+    lines.extend(request.related.iter().map(|note| format!("- [[{note}]]")));
+    lines.push(String::new());
+    lines.join("\n")
 }
 
 /// Writes a new note under `root/<folder>`, never replacing an existing file.
@@ -311,7 +412,19 @@ pub fn record_at(
         return Err("second_brain_missing".to_string());
     }
     let folder = safe_folder(request.folder.as_deref().unwrap_or(DEFAULT_FOLDER))?;
-    let content = render_note(request, now);
+    let stamp = stamp_of(request, now);
+    let id = unique_id(stamp, &existing_ids(root));
+    let folder_text = folder
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/");
+    let content = render_note(
+        request,
+        &folder_text,
+        &id,
+        &stamp.format("%Y-%m-%d").to_string(),
+    );
     if content.len() > MAX_NOTE_BYTES {
         return Err("second_brain_note_too_large".to_string());
     }
@@ -375,6 +488,10 @@ mod tests {
             summary: "Resumo".to_string(),
             body: "Corpo".to_string(),
             tags: vec!["Projeto X".to_string()],
+            kind: None,
+            area: String::new(),
+            related: Vec::new(),
+            local_stamp: Some("20261107-2105".to_string()),
         }
     }
 
@@ -414,24 +531,37 @@ mod tests {
         assert!(status.from_env);
     }
 
+    /// Byte-for-byte what `brain.py record --title 'Lote "x"' --type nota --summary Resumo
+    /// --body Corpo --tag "Projeto X" --now 2026-11-07T21:05` writes into 00-Inbox.
+    const BRAIN_PY_NOTE: &str = "---\nid: \"20261107-2105\"\ntitle: \"Lote \\\"x\\\"\"\narea: \"\"\ntype: nota\ntags: [coding-agent, orquestracao, projeto-x]\nstatus: inbox\ncreated: \"2026-11-07\"\nupdated: \"2026-11-07\"\n---\n\n# Lote \"x\"\n\n## Conteúdo\n\nResumo\n\nCorpo\n\n## Notas relacionadas\n\n";
+
     #[test]
-    fn record_writes_frontmatter_and_never_overwrites() {
+    fn record_writes_the_same_note_as_brain_py_and_never_overwrites() {
         let root = temp_root("record");
-        let now = UNIX_EPOCH + Duration::from_secs(1_794_096_000);
-        let first = record_at(&root, &request("Lote de teste"), now).unwrap();
-        let second = record_at(&root, &request("Lote de teste"), now).unwrap();
+        let first = record_at(&root, &request("Lote \"x\""), SystemTime::now()).unwrap();
+        let second = record_at(&root, &request("Lote \"x\""), SystemTime::now()).unwrap();
         assert!(
-            first.ends_with("00-Inbox/lote-de-teste.md")
-                || first.ends_with("00-Inbox\\lote-de-teste.md")
+            first.ends_with("00-Inbox/lote-x.md") || first.ends_with(r"00-Inbox\lote-x.md"),
+            "{first:?}"
         );
         assert_ne!(first, second);
-        let text = fs::read_to_string(&first).unwrap();
-        assert!(text.starts_with("---\nid: \""));
-        assert!(text.contains("title: \"Lote de teste\""));
-        assert!(text.contains("  - coding-agent\n  - projeto-x\n"));
-        assert!(text.contains("status: inbox"));
-        assert!(text.contains("# Lote de teste\n\nResumo\n\nCorpo\n"));
+        assert_eq!(fs::read_to_string(&first).unwrap(), BRAIN_PY_NOTE);
+        // Same minute taken by the first note, so the second moves on one minute like new_id.
+        assert!(fs::read_to_string(&second)
+            .unwrap()
+            .starts_with("---\nid: \"20261107-2106\""));
         fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn a_decision_gets_its_sections_and_a_project_folder_is_active() {
+        let mut req = request("Usar Codex");
+        req.kind = Some("decisao".to_string());
+        req.related = vec!["outra-nota".to_string()];
+        let note = render_note(&req, "30-Projetos/shop", "20261107-2105", "2026-11-07");
+        assert!(note.contains("status: ativo\n"));
+        assert!(note.contains("## Decisão\n\nResumo\n\nCorpo\n\n## Motivo\n\n## Consequências\n\n"));
+        assert!(note.ends_with("## Notas relacionadas\n\n- [[outra-nota]]\n"));
     }
 
     #[test]

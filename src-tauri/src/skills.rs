@@ -43,7 +43,7 @@ impl BundledSkill {
 /// Official skills; `npm run skill:sync` rewrites the version and the file list.
 const BUNDLED_SKILLS: [BundledSkill; 1] = [BundledSkill {
     name: "coding",
-    version: 27,
+    version: 28,
     repository: "https://github.com/oigorbrazil/coding-opus",
     legacy_names: &["coding-opus", "alethe", "alethe-orchestrate"],
     agents: &["claude", "codex"],
@@ -52,34 +52,6 @@ const BUNDLED_SKILLS: [BundledSkill; 1] = [BundledSkill {
         BundledSkillFile {
             path: SKILL_FILE,
             content: include_str!("../assets/skills/coding/SKILL.md"),
-        },
-        BundledSkillFile {
-            path: "assets/brands/antigravity-official.svg",
-            content: include_str!("../assets/skills/coding/assets/brands/antigravity-official.svg"),
-        },
-        BundledSkillFile {
-            path: "assets/brands/claude-official.png.b64",
-            content: include_str!("../assets/skills/coding/assets/brands/claude-official.png.b64"),
-        },
-        BundledSkillFile {
-            path: "assets/brands/kimi-official.png.b64",
-            content: include_str!("../assets/skills/coding/assets/brands/kimi-official.png.b64"),
-        },
-        BundledSkillFile {
-            path: "assets/brands/openai-official-white.svg",
-            content: include_str!("../assets/skills/coding/assets/brands/openai-official-white.svg"),
-        },
-        BundledSkillFile {
-            path: "assets/brands/router9-official.svg",
-            content: include_str!("../assets/skills/coding/assets/brands/router9-official.svg"),
-        },
-        BundledSkillFile {
-            path: "assets/editor.html",
-            content: include_str!("../assets/skills/coding/assets/editor.html"),
-        },
-        BundledSkillFile {
-            path: "assets/report.html",
-            content: include_str!("../assets/skills/coding/assets/report.html"),
         },
         BundledSkillFile {
             path: "licenses/alethe-LICENSE",
@@ -102,32 +74,12 @@ const BUNDLED_SKILLS: [BundledSkill; 1] = [BundledSkill {
             content: include_str!("../assets/skills/coding/references/briefs.md"),
         },
         BundledSkillFile {
-            path: "references/diagram.md",
-            content: include_str!("../assets/skills/coding/references/diagram.md"),
-        },
-        BundledSkillFile {
-            path: "references/manual.md",
-            content: include_str!("../assets/skills/coding/references/manual.md"),
-        },
-        BundledSkillFile {
             path: "references/memoria.md",
             content: include_str!("../assets/skills/coding/references/memoria.md"),
         },
         BundledSkillFile {
-            path: "references/modo-app.md",
-            content: include_str!("../assets/skills/coding/references/modo-app.md"),
-        },
-        BundledSkillFile {
             path: "references/obsidian-mcp.md",
             content: include_str!("../assets/skills/coding/references/obsidian-mcp.md"),
-        },
-        BundledSkillFile {
-            path: "references/onboarding.md",
-            content: include_str!("../assets/skills/coding/references/onboarding.md"),
-        },
-        BundledSkillFile {
-            path: "references/operations.md",
-            content: include_str!("../assets/skills/coding/references/operations.md"),
         },
         BundledSkillFile {
             path: "references/orquestracao.md",
@@ -138,32 +90,12 @@ const BUNDLED_SKILLS: [BundledSkill; 1] = [BundledSkill {
             content: include_str!("../assets/skills/coding/references/playbooks.md"),
         },
         BundledSkillFile {
-            path: "references/providers.md",
-            content: include_str!("../assets/skills/coding/references/providers.md"),
-        },
-        BundledSkillFile {
-            path: "references/routing.md",
-            content: include_str!("../assets/skills/coding/references/routing.md"),
-        },
-        BundledSkillFile {
-            path: "schemas/plan.schema.json",
-            content: include_str!("../assets/skills/coding/schemas/plan.schema.json"),
-        },
-        BundledSkillFile {
             path: "scripts/brain.py",
             content: include_str!("../assets/skills/coding/scripts/brain.py"),
         },
         BundledSkillFile {
-            path: "scripts/diagram.py",
-            content: include_str!("../assets/skills/coding/scripts/diagram.py"),
-        },
-        BundledSkillFile {
-            path: "scripts/hook.py",
-            content: include_str!("../assets/skills/coding/scripts/hook.py"),
-        },
-        BundledSkillFile {
-            path: "scripts/orchestrate.py",
-            content: include_str!("../assets/skills/coding/scripts/orchestrate.py"),
+            path: "scripts/playbook.py",
+            content: include_str!("../assets/skills/coding/scripts/playbook.py"),
         },
         // skill:sync files end
     ],

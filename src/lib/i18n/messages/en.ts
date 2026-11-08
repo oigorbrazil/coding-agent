@@ -698,7 +698,7 @@ export const en = {
     'Tracks the isolated child sessions OpenCode runs while planning, and shows their activity live. Only appears in projects with an OpenCode terminal.',
   'features.aiMemory.title': 'AI Memory',
   'features.aiMemory.description':
-    'Long-term memory shared across Claude Code, Codex and OpenCode. Requires the ai-memory server installed.',
+    'Optional extra memory through the ai-memory server, shared by Claude Code, Codex and OpenCode. Coding Agent’s default memory is the second brain (below); turn this on only if you also want ai-memory.',
   'aiMemory.notInstalledTitle': 'AI Memory is on, but ai-memory was not found',
   'aiMemory.notInstalledBody':
     'Install the ai-memory server so agents can share long-term memory. Agents will start normally without it.',
@@ -848,9 +848,9 @@ export const en = {
   'prefs.categoryPlaybooksDesc':
     'How each orchestration playbook flows, which models it runs and when it switches.',
   'prefs.strategyDiagramOpenPlaybooks': 'See every playbook as a flow',
-  'prefs.orchestrationSkill': 'Local orchestration skill',
+  'prefs.orchestrationSkill': 'Coding Opus',
   'prefs.orchestrationSkillDesc':
-    'Choose how the bundled skill works when you orchestrate with or without MCP.',
+    'The bundled Coding Opus skill decides what to delegate; Coding Agent runs the workers.',
   'prefs.orchestrationSkillBackend': 'Preferred backend',
   'prefs.orchestrationSkillBackend.auto': 'Automatic',
   'prefs.orchestrationSkillBackend.skill': 'Local skill only',
@@ -872,7 +872,7 @@ export const en = {
   'prefs.orchestrationSkillProviderNone': 'None',
   'prefs.orchestrationSkillProviderAuto': 'Automatic order',
   'prefs.orchestrationSkillHint':
-    'Coding Agent exports these choices to the bundled skill’s local policy file. The skill runner reads it directly and does not require MCP. An explicit instruction in the current prompt always wins.',
+    'Coding Opus reads the second brain, picks a playbook and resolves the model and effort of each phase, then delegates through this board. Edit the strategies in Playbooks; roles, routing and limits are below.',
   'prefs.strategyDiagramTitle': 'Strategy architecture',
   'prefs.strategyDiagramPlanner': 'Planner',
   'prefs.strategyDiagramTask': 'Your task',
